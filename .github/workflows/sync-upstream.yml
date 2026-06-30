@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: sync-upstream-main
@@ -19,29 +19,19 @@ jobs:
     if: github.repository != 'NousResearch/hermes-agent'
     runs-on: ubuntu-latest
     steps:
-      - name: Check personal access token
-        env:
-          SYNC_UPSTREAM_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
-        run: |
-          if [ -z "$SYNC_UPSTREAM_TOKEN" ]; then
-            echo "::error::Missing SYNC_UPSTREAM_TOKEN. Add a fine-grained personal access token for your GitHub account as a repository secret."
-            exit 1
-          fi
-
       - name: Checkout fork main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
 
       - name: Merge upstream
         id: merge
         run: |
           set -euo pipefail
 
-          git config user.name "${GITHUB_REPOSITORY_OWNER}"
-          git config user.email "${GITHUB_REPOSITORY_OWNER}@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git remote add upstream https://github.com/NousResearch/hermes-agent.git
           git fetch upstream main
