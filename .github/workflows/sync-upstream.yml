@@ -1,0 +1,58 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # Keep forks current without hammering upstream.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge upstream/main into fork main
+    if: github.repository != 'NousResearch/hermes-agent'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream
+        id: merge
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch upstream main
+
+          before="$(git rev-parse HEAD)"
+
+          if ! git merge --no-edit upstream/main; then
+            echo "::error::upstream/main could not be merged automatically. Resolve the conflict locally, push main, then rerun this workflow."
+            git status --short
+            exit 1
+          fi
+
+          after="$(git rev-parse HEAD)"
+          if [ "$before" = "$after" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Fork main is already up to date with upstream/main."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Merged upstream/main into fork main."
+          fi
+
+      - name: Push merged main
+        if: steps.merge.outputs.changed == 'true'
+        run: git push origin HEAD:main
