@@ -458,22 +458,187 @@ def _requires_argument(args_hint: str) -> bool:
     return args_hint.strip().startswith("<")
 
 
-def gateway_help_lines() -> list[str]:
+_ZH_COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "start": "处理平台启动提醒，不主动回复",
+    "new": "开启新对话，清空当前聊天上下文",
+    "topic": "开启或查看 Telegram 私聊话题会话",
+    "clear": "清屏并开启新对话",
+    "redraw": "强制刷新界面",
+    "history": "查看聊天历史",
+    "save": "保存当前对话",
+    "retry": "重新回答上一条消息",
+    "prompt": "用编辑器写下一条消息，然后发送",
+    "undo": "撤回最近几轮对话后重新回答",
+    "title": "设置当前对话标题",
+    "handoff": "把当前对话交给 Telegram、Discord 等消息平台",
+    "branch": "从当前对话创建一个分支",
+    "compress": "压缩对话上下文，减少历史占用",
+    "rollback": "查看或恢复文件系统检查点",
+    "snapshot": "创建或恢复 Hermes 配置和状态快照",
+    "stop": "停止当前正在运行的任务",
+    "approve": "同意一项待确认的敏感操作",
+    "deny": "取消一项待确认的敏感操作",
+    "background": "在后台处理一个任务",
+    "agents": "查看正在运行的任务",
+    "journey": "打开学习记录时间线",
+    "queue": "把任务排到当前任务后面，不打断当前处理",
+    "steer": "在不中断的情况下补充一句指令",
+    "goal": "设置一个跨多轮持续推进的目标",
+    "moa": "用多代理模式处理一次请求，然后恢复原模型",
+    "subgoal": "为当前目标添加或管理补充要求",
+    "status": "查看当前对话和运行状态",
+    "whoami": "查看你在当前聊天里的命令权限",
+    "profile": "查看当前 profile 名称和目录",
+    "sethome": "把这个聊天设为默认接收频道",
+    "resume": "恢复之前命名过的对话",
+    "sessions": "浏览并恢复历史对话",
+    "config": "查看当前配置",
+    "model": "切换模型",
+    "codex-runtime": "切换 OpenAI/Codex 模型使用的运行方式",
+    "personality": "切换预设个性",
+    "statusbar": "显示或隐藏上下文和模型状态栏",
+    "timestamps": "显示或隐藏消息时间",
+    "verbose": "切换工具执行过程的显示详细程度",
+    "footer": "显示或隐藏回复末尾的运行信息",
+    "yolo": "跳过敏感操作确认，谨慎使用",
+    "reasoning": "调整推理强度和推理内容显示方式",
+    "fast": "切换快速模式",
+    "skin": "查看或切换显示主题",
+    "indicator": "切换忙碌提示样式",
+    "voice": "开启、关闭或查看语音回复设置",
+    "busy": "设置 Hermes 忙碌时按回车的处理方式",
+    "tools": "管理工具的启用和禁用",
+    "toolsets": "查看可用工具组",
+    "skills": "搜索、安装、查看或管理技能",
+    "memory": "查看待写入记忆，或开关记忆确认",
+    "bundles": "查看技能包",
+    "pet": "切换或选择桌面小伙伴",
+    "hatch": "根据描述生成新的桌面小伙伴",
+    "learn": "从你描述的内容中学习一个可复用技能",
+    "cron": "管理定时任务",
+    "suggestions": "查看建议的自动化任务",
+    "blueprint": "用模板创建一个自动化任务",
+    "curator": "管理后台技能维护任务",
+    "kanban": "管理多 profile 协作看板",
+    "reload": "重新加载环境变量",
+    "reload-mcp": "重新加载 MCP 服务",
+    "reload-skills": "重新扫描已安装技能",
+    "browser": "连接到你正在使用的浏览器",
+    "plugins": "查看已安装插件及其状态",
+    "commands": "分页查看所有命令和技能",
+    "help": "查看常用命令说明",
+    "restart": "平滑重启网关，等待当前任务收尾",
+    "usage": "查看当前对话的用量和限额",
+    "credits": "查看 Nous 余额并充值",
+    "billing": "管理 Nous 账单、充值和限额",
+    "insights": "查看用量分析",
+    "platforms": "查看消息平台连接状态",
+    "platform": "暂停、恢复或查看异常消息平台",
+    "copy": "复制上一条助手回复",
+    "paste": "附加剪贴板里的图片",
+    "image": "把本地图片附加到下一条消息",
+    "update": "把 Hermes Agent 更新到最新版",
+    "version": "查看 Hermes Agent 版本",
+    "debug": "生成调试报告并得到可分享链接",
+    "quit": "退出命令行",
+}
+
+
+_ZH_COMMAND_ARGS: dict[str, str] = {
+    "new": "[名称]",
+    "topic": "[off|help|会话ID]",
+    "prompt": "[初始内容]",
+    "undo": "[次数]",
+    "title": "[标题]",
+    "handoff": "<平台>",
+    "branch": "[名称]",
+    "compress": "[here [保留轮数] | focus 主题]",
+    "rollback": "[编号]",
+    "snapshot": "[create|restore <编号>|prune]",
+    "approve": "[session|always]",
+    "background": "<你的需求>",
+    "queue": "<你的需求>",
+    "steer": "<补充内容>",
+    "goal": "[目标 | draft <目标> | show | pause | resume | clear | status | wait <编号> | unwait]",
+    "moa": "<你的需求>",
+    "subgoal": "[内容 | remove 编号 | clear]",
+    "resume": "[名称]",
+    "model": "[模型] [--provider 名称] [--global|--session] [--refresh]",
+    "codex-runtime": "[auto|codex_app_server]",
+    "personality": "[名称]",
+    "timestamps": "[on|off|status]",
+    "footer": "[on|off|status]",
+    "reasoning": "[强度|show|hide|full|clamp]",
+    "fast": "[normal|fast|status]",
+    "skin": "[名称]",
+    "indicator": "[kaomoji|emoji|unicode|ascii]",
+    "voice": "[on|off|tts|status]",
+    "busy": "[queue|steer|interrupt|status]",
+    "tools": "[list|disable|enable] [名称...]",
+    "skills": "[search|browse|inspect|install|audit|pending|approve|reject|diff|approval]",
+    "memory": "[pending|approve|reject|approval] [id|on|off]",
+    "hatch": "[描述]",
+    "learn": "<要学习的内容>",
+    "cron": "[子命令]",
+    "suggestions": "[accept|dismiss 编号 | catalog]",
+    "blueprint": "[名称] [参数=值 ...]",
+    "curator": "[子命令]",
+    "kanban": "[子命令]",
+    "commands": "[页码]",
+    "insights": "[天数]",
+    "platform": "<pause|resume|list> [平台名]",
+    "copy": "[编号]",
+    "image": "<路径>",
+    "debug": "[nous|local]",
+    "quit": "[--delete]",
+}
+
+
+def _is_zh_language(language: str | None) -> bool:
+    value = (language or "").lower().replace("_", "-")
+    return value.startswith("zh")
+
+
+def _localized_command_description(cmd: CommandDef, language: str | None) -> str:
+    if _is_zh_language(language):
+        return _ZH_COMMAND_DESCRIPTIONS.get(cmd.name, cmd.description)
+    return cmd.description
+
+
+def _localized_command_args(cmd: CommandDef, language: str | None) -> str:
+    if _is_zh_language(language):
+        return _ZH_COMMAND_ARGS.get(cmd.name, cmd.args_hint)
+    return cmd.args_hint
+
+
+def gateway_help_lines(language: str | None = None, command_prefix: str = "/") -> list[str]:
     """Generate gateway help text lines from the registry."""
     overrides = _resolve_config_gates()
+    prefix = command_prefix or "/"
+    zh = _is_zh_language(language)
     lines: list[str] = []
     for cmd in COMMAND_REGISTRY:
         if not _is_gateway_available(cmd, overrides):
             continue
-        args = f" {cmd.args_hint}" if cmd.args_hint else ""
+        args_hint = _localized_command_args(cmd, language)
+        args = f" {args_hint}" if args_hint else ""
         alias_parts: list[str] = []
         for a in cmd.aliases:
             # Skip internal aliases like reload_mcp (underscore variant)
             if a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name:
                 continue
-            alias_parts.append(f"`/{a}`")
-        alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
-        lines.append(f"`/{cmd.name}{args}` -- {cmd.description}{alias_note}")
+            alias_parts.append(f"`{prefix}{a}`")
+        if zh:
+            alias_note = f"（别名：{', '.join(alias_parts)}）" if alias_parts else ""
+            lines.append(
+                f"`{prefix}{cmd.name}{args}`："
+                f"{_localized_command_description(cmd, language)}{alias_note}"
+            )
+        else:
+            alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
+            lines.append(
+                f"`{prefix}{cmd.name}{args}` -- {cmd.description}{alias_note}"
+            )
     return lines
 
 

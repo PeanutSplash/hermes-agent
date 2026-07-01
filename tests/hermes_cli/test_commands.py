@@ -217,6 +217,14 @@ class TestGatewayHelpLines:
         assert len(bg_line) == 1
         assert "/bg" in bg_line[0]
 
+    def test_can_render_chinese_gateway_help_lines(self):
+        lines = gateway_help_lines(language="zh-Hans")
+        joined = "\n".join(lines)
+        assert "`/new [名称]`：开启新对话，清空当前聊天上下文" in joined
+        assert "别名：`/reset`" in joined
+        assert "Start a new session" not in joined
+        assert " -- " not in joined
+
 
 class TestTelegramBotCommands:
     def test_returns_list_of_tuples(self):

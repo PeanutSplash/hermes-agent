@@ -153,6 +153,7 @@ def _friendly_weixin_help_reply(prefix: str = "/") -> str:
                     "其他",
                     "",
                     f"- `{p}voice`：查看或切换语音回复",
+                    f"- `{p}commands`：查看完整命令列表",
                     f"- `{p}help`：查看这份说明",
                 ]
             ),
@@ -1161,44 +1162,79 @@ class GatewaySlashCommandsMixin:
         else:
             requested_page = 1
 
+        source = getattr(event, "source", None)
+        platform = getattr(source, "platform", None)
+        is_weixin = platform == Platform.WEIXIN
+        language = "zh-Hans" if is_weixin else None
+        prefix = self._typed_command_prefix_for(platform) if is_weixin else "/"
+
         # Build combined entry list: built-in commands + skill commands
-        entries = list(gateway_help_lines())
+        entries = list(gateway_help_lines(language=language, command_prefix=prefix))
         try:
             from agent.skill_commands import get_skill_commands
             skill_cmds = get_skill_commands()
             if skill_cmds:
                 entries.append("")
-                entries.append(t("gateway.commands.skill_header"))
+                entries.append(
+                    "技能命令（说明来自技能文件）"
+                    if is_weixin else t("gateway.commands.skill_header")
+                )
                 for cmd in sorted(skill_cmds):
                     desc = skill_cmds[cmd].get("description", "").strip() or t("gateway.commands.default_desc")
-                    entries.append(f"`{cmd}` — {desc}")
+                    if is_weixin:
+                        desc = re.sub(r"\s+", " ", desc)
+                        if len(desc) > 80:
+                            desc = desc[:77].rstrip() + "..."
+                        entries.append(f"`{cmd}`：{desc}")
+                    else:
+                        entries.append(f"`{cmd}` — {desc}")
         except Exception:
             pass
 
         if not entries:
             return t("gateway.commands.none")
 
-        from gateway.config import Platform
-        page_size = 15 if event.source.platform == Platform.TELEGRAM else 20
+        page_size = 15 if platform == Platform.TELEGRAM else 20
         total_pages = max(1, (len(entries) + page_size - 1) // page_size)
         page = max(1, min(requested_page, total_pages))
         start = (page - 1) * page_size
         page_entries = entries[start:start + page_size]
+        if is_weixin:
+            page_entries = [
+                f"- {entry}" if entry.startswith("`") else entry
+                for entry in page_entries
+            ]
 
-        lines = [
-            t("gateway.commands.header", total=len(entries), page=page, total_pages=total_pages),
-            "",
-            *page_entries,
-        ]
+        if is_weixin:
+            lines = [
+                f"📖 Hermes 完整命令（第 {page}/{total_pages} 页）",
+                "",
+                *page_entries,
+            ]
+        else:
+            lines = [
+                t("gateway.commands.header", total=len(entries), page=page, total_pages=total_pages),
+                "",
+                *page_entries,
+            ]
         if total_pages > 1:
             nav_parts = []
             if page > 1:
-                nav_parts.append(t("gateway.commands.nav_prev", page=page - 1))
+                nav_parts.append(
+                    f"上一页：`{prefix}commands {page - 1}`"
+                    if is_weixin else t("gateway.commands.nav_prev", page=page - 1)
+                )
             if page < total_pages:
-                nav_parts.append(t("gateway.commands.nav_next", page=page + 1))
-            lines.extend(["", " | ".join(nav_parts)])
+                nav_parts.append(
+                    f"下一页：`{prefix}commands {page + 1}`"
+                    if is_weixin else t("gateway.commands.nav_next", page=page + 1)
+                )
+            lines.extend(["", "\n".join(nav_parts) if is_weixin else " | ".join(nav_parts)])
         if page != requested_page:
-            lines.append(t("gateway.commands.out_of_range", requested=requested_page, page=page))
+            lines.append(
+                f"你请求的是第 {requested_page} 页，已显示最接近的第 {page} 页。"
+                if is_weixin else t("gateway.commands.out_of_range", requested=requested_page, page=page)
+            )
         return _telegramize_command_mentions(
             "\n".join(lines),
             getattr(getattr(event, "source", None), "platform", None),

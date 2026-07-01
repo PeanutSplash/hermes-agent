@@ -100,3 +100,40 @@ async def test_help_uses_public_chinese_short_guide_for_weixin():
     assert "Show available commands" not in result
     assert "Start a new session" not in result
     assert " -- " not in result
+
+
+@pytest.mark.asyncio
+async def test_commands_uses_chinese_builtin_descriptions_for_weixin(monkeypatch):
+    monkeypatch.setattr("agent.skill_commands.get_skill_commands", lambda: {})
+
+    result = await _make_runner()._handle_commands_command(
+        _make_event("/commands", Platform.WEIXIN)
+    )
+
+    assert result.startswith("📖 Hermes 完整命令")
+    assert "- `/new [名称]`：开启新对话，清空当前聊天上下文" in result
+    assert "- `/background <你的需求>`：在后台处理一个任务" in result
+    assert "Start a new session" not in result
+    assert "Run a prompt in the background" not in result
+    assert " -- " not in result
+
+
+@pytest.mark.asyncio
+async def test_commands_truncates_long_skill_descriptions_for_weixin(monkeypatch):
+    monkeypatch.setattr(
+        "agent.skill_commands.get_skill_commands",
+        lambda: {
+            "/long-skill": {
+                "description": "This is a very long skill description " * 10,
+            }
+        },
+    )
+
+    result = await _make_runner()._handle_commands_command(
+        _make_event("/commands 4", Platform.WEIXIN)
+    )
+
+    assert "技能命令（说明来自技能文件）" in result
+    assert "- `/long-skill`：" in result
+    assert "..." in result
+    assert "This is a very long skill description " * 3 not in result
