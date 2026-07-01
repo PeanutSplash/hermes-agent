@@ -447,6 +447,31 @@ def _should_suppress_weixin_busy_ack(event: Any) -> bool:
     return not bool(event.get_command())
 
 
+def _weixin_approval_action_summary(description: str, command: str) -> str:
+    desc = str(description or "").lower()
+    cmd = str(command or "").lower()
+    if "execute_code" in desc or "execute_code" in cmd:
+        return "运行一段本地脚本来读取或计算数据"
+    if "rm " in cmd or "delete" in desc or "remove" in desc:
+        return "执行一个可能删除内容的本地操作"
+    if "write" in desc or "mutate" in desc or ">" in cmd:
+        return "执行一个可能修改本地文件的操作"
+    return "执行一个本地操作"
+
+
+def _weixin_gateway_approval_prompt(command: str, description: str, prefix: str) -> str:
+    action = _weixin_approval_action_summary(description, command)
+    return (
+        "⚠️ 需要你确认\n\n"
+        f"为了继续，我需要{action}。\n\n"
+        "这类操作可能读取或修改本机文件；不确认就不会执行。\n\n"
+        "回复：\n"
+        f"- `{prefix}approve`：同意这一次\n"
+        f"- `{prefix}approve session`：本轮聊天同类操作都同意\n"
+        f"- `{prefix}deny`：取消"
+    )
+
+
 def _gateway_provider_error_reply(text: str, platform: Any = None) -> str:
     """Map raw provider/API errors to a short user-safe chat reply."""
     if _is_weixin_platform(platform):
@@ -17173,13 +17198,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Slack threads and reserved by Matrix clients.
                 _p = getattr(_status_adapter, "typed_command_prefix", "/")
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
-                msg = (
-                    f"⚠️ **Dangerous command requires approval:**\n"
-                    f"```\n{cmd_preview}\n```\n"
-                    f"Reason: {desc}\n\n"
-                    f"Reply `{_p}approve` to execute, `{_p}approve session` to approve this pattern "
-                    f"for the session, `{_p}approve always` to approve permanently, or `{_p}deny` to cancel."
-                )
+                if _is_weixin_platform(source.platform):
+                    msg = _weixin_gateway_approval_prompt(cmd, desc, _p)
+                else:
+                    msg = (
+                        f"⚠️ **Dangerous command requires approval:**\n"
+                        f"```\n{cmd_preview}\n```\n"
+                        f"Reason: {desc}\n\n"
+                        f"Reply `{_p}approve` to execute, `{_p}approve session` to approve this pattern "
+                        f"for the session, `{_p}approve always` to approve permanently, or `{_p}deny` to cancel."
+                    )
                 try:
                     _approval_send_fut = safe_schedule_threadsafe(
                         _status_adapter.send(

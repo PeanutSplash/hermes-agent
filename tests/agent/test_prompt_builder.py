@@ -1127,6 +1127,11 @@ class TestPromptBuilderConstants:
         assert "weixin" in lowered or "wechat" in lowered
         assert "simplified chinese" in lowered
         assert "developer jargon" in lowered
+        assert "ordinary consumers" in lowered
+        assert "lead with the result" in lowered
+        assert "do not narrate your process" in lowered
+        assert "scripts" in lowered
+        assert "file paths" in lowered
         assert "safe markdown" in lowered
         assert "**bold**" in hint
         assert "fenced code" in lowered

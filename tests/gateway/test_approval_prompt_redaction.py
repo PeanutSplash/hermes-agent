@@ -17,7 +17,7 @@ the redactor regexes so the assertions stay meaningful, but contain no real
 or real-looking key, so secret scanners do not flag this file.
 """
 
-from gateway.run import _redact_approval_command
+from gateway.run import _redact_approval_command, _weixin_gateway_approval_prompt
 
 # Synthetic, scanner-safe credential fixtures. Each matches its redactor
 # regex (ghp_/sk-/JWT) but is unmistakably fake -- a run of X's, never a
@@ -65,6 +65,33 @@ class TestRedactApprovalCommand:
     def test_handles_none_and_empty(self):
         assert _redact_approval_command("") == ""
         assert _redact_approval_command(None) == ""
+
+
+class TestWeixinApprovalPrompt:
+    def test_uses_public_friendly_chinese_without_script_body(self):
+        command = (
+            "execute_code <<'PY'\n"
+            "from pathlib import Path\n"
+            "rows = Path('/root/.hermes/scripts/tantantang_history.csv').read_text()\n"
+            "print(rows)\n"
+            "PY"
+        )
+        description = (
+            "execute_code script execution. The script can spawn subprocesses or "
+            "mutate files without passing through terminal command approval; "
+            "approval is one-shot for this run."
+        )
+
+        prompt = _weixin_gateway_approval_prompt(command, description, "/")
+
+        assert "需要你确认" in prompt
+        assert "运行一段本地脚本来读取或计算数据" in prompt
+        assert "`/approve`" in prompt
+        assert "`/deny`" in prompt
+        assert "Dangerous command requires approval" not in prompt
+        assert "execute_code" not in prompt
+        assert "tantantang_history.csv" not in prompt
+        assert "subprocesses" not in prompt
 
 
 class TestApprovalCommandWiring:
