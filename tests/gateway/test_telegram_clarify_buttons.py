@@ -466,6 +466,7 @@ class TestBaseAdapterClarifyFallback:
 
             def __init__(self):
                 # Skip base __init__ — we're not exercising it
+                self.platform = None
                 self.sent: list = []
 
             async def connect(self, *, is_reconnect: bool = False): pass
@@ -492,6 +493,43 @@ class TestBaseAdapterClarifyFallback:
         assert "Pick a fruit" in text
         assert "1." in text and "apple" in text
         assert "2." in text and "banana" in text
+        assert "Reply with the number, the option text, or your own answer." in text
+
+    @pytest.mark.asyncio
+    async def test_numbered_text_fallback_uses_chinese_instruction_for_weixin(self):
+        from gateway.config import Platform
+        from gateway.platforms.base import BasePlatformAdapter, SendResult
+
+        class _Stub(BasePlatformAdapter):
+            name = "stub"
+
+            def __init__(self):
+                self.platform = Platform.WEIXIN
+                self.sent: list = []
+
+            async def connect(self, *, is_reconnect: bool = False): pass
+            async def disconnect(self): pass
+            async def send(self, chat_id, content, **kw):
+                self.sent.append({"chat_id": chat_id, "content": content})
+                return SendResult(success=True, message_id="1")
+            async def edit(self, *a, **k): return SendResult(success=False)
+            async def get_history(self, *a, **k): return []
+            async def get_chat_info(self, *a, **k): return {}
+
+        adapter = _Stub()
+
+        result = await adapter.send_clarify(
+            chat_id="c",
+            question="你更方便用哪种方式？",
+            choices=["发链接", "发截图"],
+            clarify_id="x",
+            session_key="s",
+        )
+
+        assert result.success is True
+        text = adapter.sent[0]["content"]
+        assert "你可以直接回复序号、选项文字，或者自己补充说明。" in text
+        assert "Reply with the number" not in text
 
     @pytest.mark.asyncio
     async def test_open_ended_fallback_renders_question_only(self):
@@ -521,3 +559,27 @@ class TestBaseAdapterClarifyFallback:
         assert "Free form?" in adapter.sent[0]
         # No numbered list — choices were empty
         assert "1." not in adapter.sent[0]
+
+    def test_weixin_base_user_facing_fallback_copy_is_chinese(self):
+        from gateway.config import Platform
+        from gateway.platforms.base import (
+            _delivery_failure_notice,
+            _handler_error_notice,
+            _plain_text_fallback_content,
+        )
+
+        assert "回复发送失败" in _delivery_failure_notice(Platform.WEIXIN)
+        assert "Response formatting failed" not in _plain_text_fallback_content(Platform.WEIXIN, "正文")
+        assert "处理时遇到错误" in _handler_error_notice(Platform.WEIXIN, "ValueError", "bad")
+
+    def test_non_weixin_base_user_facing_fallback_copy_stays_english(self):
+        from gateway.config import Platform
+        from gateway.platforms.base import (
+            _delivery_failure_notice,
+            _handler_error_notice,
+            _plain_text_fallback_content,
+        )
+
+        assert "Message delivery failed" in _delivery_failure_notice(Platform.TELEGRAM)
+        assert "Response formatting failed" in _plain_text_fallback_content(Platform.TELEGRAM, "body")
+        assert "Sorry, I encountered an error" in _handler_error_notice(Platform.TELEGRAM, "ValueError", "bad")

@@ -305,6 +305,13 @@ class TestFormatFooter:
     def test_empty_returns_empty_string(self):
         assert AIAgent._format_file_mutation_failure_footer({}) == ""
 
+    def test_verifier_disabled_for_weixin_platform_by_default(self, monkeypatch):
+        monkeypatch.delenv("HERMES_FILE_MUTATION_VERIFIER", raising=False)
+        agent = object.__new__(AIAgent)
+        agent.platform = "weixin"
+
+        assert agent._file_mutation_verifier_enabled() is False
+
     def test_single_failure(self):
         out = AIAgent._format_file_mutation_failure_footer(
             {"/tmp/a.md": {"tool": "patch", "error_preview": "Could not find old_string"}},

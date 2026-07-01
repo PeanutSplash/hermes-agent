@@ -2700,6 +2700,8 @@ class AIAgent:
                 _cfg = _load_config() or {}
             except Exception:
                 _cfg = {}
+            if str(getattr(self, "platform", "") or "").lower() == "weixin":
+                return False
             _display = _cfg.get("display") if isinstance(_cfg, dict) else None
             if isinstance(_display, dict) and "file_mutation_verifier" in _display:
                 return bool(_display.get("file_mutation_verifier"))

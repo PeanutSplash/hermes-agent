@@ -4,6 +4,15 @@ import pytest
 
 from gateway.config import Platform
 from gateway.run import (
+    _destructive_slash_cancelled_reply,
+    _destructive_slash_opt_out_note,
+    _destructive_slash_prompt_message,
+    _active_session_limit_reply,
+    _gateway_pairing_code_reply,
+    _gateway_pairing_rate_limited_reply,
+    _gateway_unexpected_error_reply,
+    _gateway_update_prompt_message,
+    _gateway_update_response_sent_reply,
     _long_running_notification_schedule,
     _prepare_gateway_status_message,
     _public_progress_notice,
@@ -196,6 +205,27 @@ def test_weixin_final_response_sanitizes_provider_errors_in_chinese():
     assert "请稍后再试" in sanitized
 
 
+def test_weixin_final_response_strips_file_mutation_verifier_footer_only():
+    raw = (
+        "验证结果：\n\n"
+        "- `opencli-ipv4-bridge.service`：active (running)\n"
+        "- `opencli doctor`：Everything looks good\n\n"
+        "⚠️ File-mutation verifier: 1 file(s) were NOT modified this turn "
+        "despite any wording above that may suggest otherwise. Run `git status` "
+        "or `read_file` to confirm.\n"
+        "  • `/etc/systemd/system/opencli-ipv4-bridge.service` — [write_file] "
+        "Refusing to write to sensitive system path."
+    )
+
+    sanitized = _sanitize_gateway_final_response(Platform.WEIXIN, raw)
+
+    assert "File-mutation verifier" not in sanitized
+    assert "Refusing to write to sensitive system path" not in sanitized
+    assert "active (running)" in sanitized
+    assert "Everything looks good" in sanitized
+    assert "`opencli doctor`" in sanitized
+
+
 def test_weixin_runtime_notices_are_public_friendly_chinese():
     assert _weixin_long_running_notice(3) == "⏳ 我还在处理，已用约 3 分钟。"
     assert _public_progress_notice(elapsed_seconds=30, first=True) == "收到，我正在处理，可能需要一会儿。"
@@ -217,6 +247,92 @@ def test_weixin_runtime_notices_are_public_friendly_chinese():
     assert "/new" in timeout
     assert "agent" not in warning.lower()
     assert "gateway_timeout" not in timeout
+
+
+def test_weixin_gateway_control_prompts_are_public_friendly_chinese():
+    pairing = _gateway_pairing_code_reply(
+        Platform.WEIXIN,
+        platform_name="weixin",
+        code="123456",
+    )
+    assert "配对码" in pairing
+    assert "I don't recognize" not in pairing
+
+    assert _gateway_pairing_rate_limited_reply(Platform.WEIXIN) == "配对请求太频繁了，请稍后再试。"
+
+    update_prompt = _gateway_update_prompt_message(
+        Platform.WEIXIN,
+        prompt="是否继续？",
+        default="n",
+        prefix="/",
+    )
+    assert "更新需要你确认" in update_prompt
+    assert "Reply" not in update_prompt
+    assert _gateway_update_response_sent_reply(Platform.WEIXIN, "y") == "已把 `y` 发给更新流程。"
+
+    confirm = _destructive_slash_prompt_message(
+        Platform.WEIXIN,
+        command="new",
+        detail="This starts a fresh session and discards the current conversation history.",
+        prefix="/",
+    )
+    assert "请确认 /new" in confirm
+    assert "开启一个全新的对话" in confirm
+    assert "Choose:" not in confirm
+    assert _destructive_slash_cancelled_reply(Platform.WEIXIN, "new") == "🟡 已取消 /new，当前聊天没有变化。"
+    assert "以后 /clear" in _destructive_slash_opt_out_note(Platform.WEIXIN)
+    assert "会话已满" in _active_session_limit_reply(
+        Platform.WEIXIN,
+        active_count=2,
+        max_sessions=2,
+    )
+    assert "处理时遇到异常" in _gateway_unexpected_error_reply(
+        Platform.WEIXIN,
+        status_code=429,
+        history_len=1,
+    )
+    assert "聊天内容太长" in _gateway_unexpected_error_reply(
+        Platform.WEIXIN,
+        status_code=400,
+        history_len=80,
+    )
+
+
+def test_non_weixin_gateway_control_prompts_keep_existing_english():
+    pairing = _gateway_pairing_code_reply(
+        Platform.TELEGRAM,
+        platform_name="telegram",
+        code="123456",
+    )
+    assert "Here's your pairing code" in pairing
+
+    update_prompt = _gateway_update_prompt_message(
+        Platform.TELEGRAM,
+        prompt="Continue?",
+        default="n",
+        prefix="/",
+    )
+    assert "Update needs your input" in update_prompt
+    assert "Reply `/approve`" in update_prompt
+
+    confirm = _destructive_slash_prompt_message(
+        Platform.TELEGRAM,
+        command="new",
+        detail="This starts a fresh session.",
+        prefix="/",
+    )
+    assert "Confirm /new" in confirm
+    assert "Choose:" in confirm
+    assert "active session limit" in _active_session_limit_reply(
+        Platform.TELEGRAM,
+        active_count=2,
+        max_sessions=2,
+    )
+    assert "unexpected error" in _gateway_unexpected_error_reply(
+        Platform.TELEGRAM,
+        status_code=429,
+        history_len=1,
+    )
 
 
 def test_public_presentation_schedule_enables_weixin_reassurance_by_default():

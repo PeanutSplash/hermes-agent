@@ -626,6 +626,184 @@ def _weixin_gateway_approval_prompt(command: str, description: str, prefix: str)
     )
 
 
+def _gateway_pairing_code_reply(platform: Any, *, platform_name: str, code: str) -> str:
+    if _is_weixin_platform(platform):
+        return (
+            "你好，我还不认识这个账号。\n\n"
+            f"配对码：`{code}`\n\n"
+            "请把这个配对码发给机器人管理员，由管理员完成授权。"
+        )
+    return (
+        f"Hi~ I don't recognize you yet!\n\n"
+        f"Here's your pairing code: `{code}`\n\n"
+        f"Ask the bot owner to run:\n"
+        f"`hermes pairing approve {platform_name} {code}`"
+    )
+
+
+def _gateway_pairing_rate_limited_reply(platform: Any) -> str:
+    if _is_weixin_platform(platform):
+        return "配对请求太频繁了，请稍后再试。"
+    return "Too many pairing requests right now~ Please try again later!"
+
+
+def _gateway_update_prompt_message(platform: Any, *, prompt: str, default: str, prefix: str) -> str:
+    if _is_weixin_platform(platform):
+        default_hint = f"（默认：{default}）" if default else ""
+        return (
+            "⚕ 更新需要你确认\n\n"
+            f"{prompt}{default_hint}\n\n"
+            f"你可以回复 `{prefix}approve` 表示同意，回复 `{prefix}deny` 表示不同意，"
+            "也可以直接输入你的回答。"
+        )
+    default_hint = f" (default: {default})" if default else ""
+    return (
+        f"⚕ **Update needs your input:**\n\n"
+        f"{prompt}{default_hint}\n\n"
+        f"Reply `{prefix}approve` (yes) or `{prefix}deny` (no), "
+        f"or type your answer directly."
+    )
+
+
+def _gateway_update_response_sent_reply(platform: Any, label: str) -> str:
+    if _is_weixin_platform(platform):
+        return f"已把 `{label}` 发给更新流程。"
+    return f"✓ Sent `{label}` to the update process."
+
+
+def _gateway_update_response_failed_reply(platform: Any, error: Exception) -> str:
+    if _is_weixin_platform(platform):
+        return f"没有成功把回复发给更新流程：{error}"
+    return f"✗ Failed to send response to update process: {error}"
+
+
+def _destructive_slash_cancelled_reply(platform: Any, command: str) -> str:
+    if _is_weixin_platform(platform):
+        return f"🟡 已取消 /{command}，当前聊天没有变化。"
+    return f"🟡 /{command} cancelled. Conversation unchanged."
+
+
+def _destructive_slash_detail_for_platform(platform: Any, command: str, detail: str) -> str:
+    if not _is_weixin_platform(platform):
+        return detail
+    if command == "new":
+        return "这会开启一个全新的对话，并清空当前聊天的上下文。"
+    if command == "undo":
+        match = re.search(r"last\s+(\d+)\s+user\s+turns", str(detail), re.IGNORECASE)
+        if match:
+            return f"这会从上下文里移除最近 {match.group(1)} 轮用户消息和对应回复。"
+        return "这会从上下文里移除上一轮用户消息和对应回复。"
+    return detail
+
+
+def _destructive_slash_prompt_message(platform: Any, *, command: str, detail: str, prefix: str) -> str:
+    if _is_weixin_platform(platform):
+        detail = _destructive_slash_detail_for_platform(platform, command, detail)
+        return (
+            f"⚠️ 请确认 /{command}\n\n"
+            f"{detail}\n\n"
+            "请选择：\n"
+            "- `approve`：只同意这一次\n"
+            "- `always`：以后不再询问，直接执行\n"
+            "- `cancel`：取消，保留当前聊天\n\n"
+            f"你也可以直接回复 `{prefix}approve`、`{prefix}always` 或 `{prefix}cancel`。"
+        )
+    return (
+        f"⚠️ **Confirm /{command}**\n\n"
+        f"{detail}\n\n"
+        "Choose:\n"
+        "• **Approve Once** — proceed this time only\n"
+        "• **Always Approve** — proceed and silence this prompt permanently\n"
+        "• **Cancel** — keep current conversation\n\n"
+        f"_Text fallback: reply `{prefix}approve`, `{prefix}always`, or `{prefix}cancel`._"
+    )
+
+
+def _destructive_slash_opt_out_note(platform: Any) -> str:
+    if _is_weixin_platform(platform):
+        return (
+            "\n\nℹ️ 以后 /clear、/new、/reset 和 /undo 会直接执行，不再二次确认。"
+            "如需恢复确认，可以在 config.yaml 里重新开启 "
+            "`approvals.destructive_slash_confirm: true`。"
+        )
+    return (
+        "\n\nℹ️ Future /clear, /new, /reset, and /undo will run "
+        "without confirmation. Re-enable via "
+        "`approvals.destructive_slash_confirm: true` in config.yaml."
+    )
+
+
+def _gateway_unexpected_error_reply(platform: Any, *, status_code: Any = None, history_len: int = 0, error: Any = None) -> str:
+    if _is_weixin_platform(platform):
+        if status_code == 401:
+            hint = "服务连接暂时失效，需要管理员检查账号或密钥。"
+        elif status_code == 402:
+            hint = "当前服务额度可能不足，需要管理员检查账号额度。"
+        elif status_code == 429:
+            hint = "当前请求较多或额度受限，请稍后再试。"
+        elif status_code == 529:
+            hint = "模型服务暂时繁忙，请稍后再试。"
+        elif status_code in {400, 500} and history_len > 50:
+            return (
+                "⚠️ 这段聊天内容太长，模型已经放不下了。\n"
+                "可以发送 /compact 压缩上下文，或发送 /reset 重新开始。"
+            )
+        elif status_code == 400:
+            hint = "这次请求被模型服务拒绝了，可以换个说法再试。"
+        else:
+            hint = "你可以再试一次，或发送 /reset 重新开始。"
+        return f"抱歉，处理时遇到异常。\n{hint}"
+
+    status_hint = ""
+    if status_code == 401:
+        status_hint = " Check your API key or run `claude /login` to refresh OAuth credentials."
+    elif status_code == 402:
+        status_hint = " Your API balance or quota is exhausted. Check your provider dashboard."
+    elif status_code == 429:
+        resets_in = None
+        try:
+            response = getattr(error, "response", None)
+            err_json = response.json().get("error", {}) if response is not None else {}
+            if isinstance(err_json, dict) and err_json.get("type") == "usage_limit_reached":
+                resets_in = err_json.get("resets_in_seconds")
+        except Exception:
+            resets_in = None
+        if resets_in and resets_in > 0:
+            import math
+            hours = math.ceil(resets_in / 3600)
+            status_hint = f" Your plan's usage limit has been reached. It resets in ~{hours}h."
+        elif resets_in is not None:
+            status_hint = " Your plan's usage limit has been reached. Please wait until it resets."
+        else:
+            status_hint = " You are being rate-limited. Please wait a moment and try again."
+    elif status_code == 529:
+        status_hint = " The API is temporarily overloaded. Please try again shortly."
+    elif status_code in {400, 500} and history_len > 50:
+        return (
+            "⚠️ Session too large for the model's context window.\n"
+            "Use /compact to compress the conversation, or "
+            "/reset to start fresh."
+        )
+    elif status_code == 400:
+        status_hint = " The request was rejected by the API."
+    return (
+        f"Sorry, I encountered an unexpected error.{status_hint}\n"
+        "Try again or use /reset to start a fresh session."
+    )
+
+
+def _active_session_limit_reply(platform: Any, *, active_count: int, max_sessions: int) -> str:
+    if _is_weixin_platform(platform):
+        return (
+            f"当前同时处理的会话已满（{active_count}/{max_sessions}）。\n"
+            "请等其他会话结束后再试。"
+        )
+    return (
+        f"Hermes is at the active session limit ({active_count}/{max_sessions}). "
+        "Try again when another session finishes."
+    )
+
+
 def _gateway_provider_error_reply(text: str, platform: Any = None) -> str:
     """Map raw provider/API errors to a short user-safe chat reply."""
     if _is_weixin_platform(platform):
@@ -686,6 +864,22 @@ def _looks_like_gateway_provider_error(text: str) -> bool:
     return bool(_GATEWAY_PROVIDER_ERROR_SHAPE_RE.search(body))
 
 
+_FILE_MUTATION_VERIFIER_FOOTER_RE = re.compile(
+    r"(?:\n\s*)*⚠️\s*File-mutation verifier:.*\Z",
+    re.DOTALL,
+)
+
+
+def _strip_file_mutation_verifier_footer(text: str) -> str:
+    if not text:
+        return text
+    return _FILE_MUTATION_VERIFIER_FOOTER_RE.sub("", text).rstrip()
+
+
+def _polish_weixin_final_response(text: str) -> str:
+    return _strip_file_mutation_verifier_footer(text)
+
+
 def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     """Sanitize final gateway replies before sending them to chat surfaces.
 
@@ -702,6 +896,8 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
         return text
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
+    if _is_weixin_platform(platform):
+        redacted = _polish_weixin_final_response(redacted)
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted, platform=platform)
     return redacted
@@ -4848,7 +5044,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             return None
 
-    def _active_session_limit_message(self, session_key: str) -> Optional[str]:
+    def _active_session_limit_message(self, session_key: str, source: Optional[SessionSource] = None) -> Optional[str]:
         """Return a user-facing rejection when starting a new session exceeds the cap."""
         max_sessions = self._get_max_concurrent_sessions()
         if max_sessions is None:
@@ -4858,9 +5054,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         active_count = len(getattr(self, "_running_agents", {}))
         if active_count < max_sessions:
             return None
-        return (
-            f"Hermes is at the active session limit ({active_count}/{max_sessions}). "
-            "Try again when another session finishes."
+        return _active_session_limit_reply(
+            getattr(source, "platform", None),
+            active_count=active_count,
+            max_sessions=max_sessions,
         )
 
     def _claim_active_session_slot(
@@ -4871,7 +5068,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Claim a cross-process active-session slot for a new gateway turn."""
         if session_key in getattr(self, "_running_agents", {}):
             return None, None
-        local_limit_message = self._active_session_limit_message(session_key)
+        local_limit_message = self._active_session_limit_message(session_key, source)
         if local_limit_message is not None:
             return None, local_limit_message
         try:
@@ -8480,18 +8677,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if adapter:
                         await adapter.send(
                             source.chat_id,
-                            f"Hi~ I don't recognize you yet!\n\n"
-                            f"Here's your pairing code: `{code}`\n\n"
-                            f"Ask the bot owner to run:\n"
-                            f"`hermes pairing approve {platform_name} {code}`"
+                            _gateway_pairing_code_reply(
+                                source.platform,
+                                platform_name=platform_name,
+                                code=code,
+                            ),
                         )
                 else:
                     adapter = self.adapters.get(source.platform)
                     if adapter:
                         await adapter.send(
                             source.chat_id,
-                            "Too many pairing requests right now~ "
-                            "Please try again later!"
+                            _gateway_pairing_rate_limited_reply(source.platform),
                         )
                     # Record rate limit so subsequent messages are silently ignored
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
@@ -8542,10 +8739,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     prompt_path.unlink(missing_ok=True)
                 except OSError as e:
                     logger.warning("Failed to write update response: %s", e)
-                    return f"✗ Failed to send response to update process: {e}"
+                    return _gateway_update_response_failed_reply(source.platform, e)
                 _update_prompts.pop(_quick_key, None)
                 label = response_text if len(response_text) <= 20 else response_text[:20] + "…"
-                return f"✓ Sent `{label}` to the update process."
+                return _gateway_update_response_sent_reply(source.platform, label)
             # Recognized slash command during a pending update prompt:
             # unblock the detached update subprocess by writing a blank
             # response so ``_gateway_prompt`` returns the prompt's default
@@ -9291,11 +9488,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             from agent.learn_prompt import build_learn_prompt
 
             _learn_req = event.get_command_args().strip()
-            _ack = (
-                "Learning a skill from what you described…"
-                if _learn_req
-                else "Learning a skill from this conversation…"
-            )
+            if _is_weixin_platform(source.platform):
+                _ack = "我正在整理成可复用技能，可能需要一会儿。"
+            else:
+                _ack = (
+                    "Learning a skill from what you described…"
+                    if _learn_req
+                    else "Learning a skill from this conversation…"
+                )
             try:
                 adapter = self.adapters.get(source.platform)
                 if adapter:
@@ -9307,6 +9507,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 event.text = build_learn_prompt(_learn_req)
                 # fall through to agent processing
             except Exception:
+                if _is_weixin_platform(source.platform):
+                    return "没有成功开始学习技能，请稍后再试。"
                 return "Could not start /learn — please try again."
 
         if canonical == "fast":
@@ -9500,6 +9702,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 self._evict_cached_agent(_quick_key)
                 event._moa_disable_after_turn = True
             except Exception:
+                if _is_weixin_platform(source.platform):
+                    return "没有成功准备这次多模型处理，请稍后再试。"
                 return "Failed to prepare MoA turn."
 
         if canonical == "subgoal":
@@ -9558,12 +9762,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             if output:
                                 from agent.redact import redact_sensitive_text
                                 output = redact_sensitive_text(output)
-                            return output if output else "Command returned no output."
+                            if output:
+                                return output
+                            if _is_weixin_platform(source.platform):
+                                return "命令已执行，但没有输出内容。"
+                            return "Command returned no output."
                         except asyncio.TimeoutError:
+                            if _is_weixin_platform(source.platform):
+                                return "快捷命令执行超时（30 秒）。"
                             return "Quick command timed out (30s)."
                         except Exception as e:
+                            if _is_weixin_platform(source.platform):
+                                return f"快捷命令执行出错：{e}"
                             return f"Quick command error: {e}"
                     else:
+                        if _is_weixin_platform(source.platform):
+                            return f"快捷命令 /{command} 没有配置具体命令。"
                         return f"Quick command '/{command}' has no command defined."
                 elif qcmd.get("type") == "alias":
                     target = qcmd.get("target", "").strip()
@@ -9575,8 +9789,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         command = target_command.split()[0] if target_command else target_command
                         # Fall through to normal command dispatch below
                     else:
+                        if _is_weixin_platform(source.platform):
+                            return f"快捷命令 /{command} 没有配置目标。"
                         return f"Quick command '/{command}' has no target defined."
                 else:
+                    if _is_weixin_platform(source.platform):
+                        return f"快捷命令 /{command} 类型不支持。当前只支持 exec 和 alias。"
                     return f"Quick command '/{command}' has unsupported type (supported: 'exec', 'alias')."
 
         # Plugin-registered slash commands
@@ -11497,51 +11715,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.debug("Failed to persist inbound user message after agent exception", exc_info=True)
             # Log full details server-side only; never expose raw exception
             # types or messages to end users (info-leakage risk).
-            status_hint = ""
             status_code = getattr(e, "status_code", None)
             _hist_len = len(history) if 'history' in locals() else 0
-            if status_code == 401:
-                status_hint = " Check your API key or run `claude /login` to refresh OAuth credentials."
-            elif status_code == 402:
-                status_hint = " Your API balance or quota is exhausted. Check your provider dashboard."
-            elif status_code == 429:
-                # Check if this is a plan usage limit (resets on a schedule) vs a transient rate limit
-                _err_body = getattr(e, "response", None)
-                _err_json = {}
-                try:
-                    if _err_body is not None:
-                        _err_json = _err_body.json().get("error", {})
-                        if not isinstance(_err_json, dict):
-                            _err_json = {}
-                except Exception:
-                    pass
-                if _err_json.get("type") == "usage_limit_reached":
-                    _resets_in = _err_json.get("resets_in_seconds")
-                    if _resets_in and _resets_in > 0:
-                        import math
-                        _hours = math.ceil(_resets_in / 3600)
-                        status_hint = f" Your plan's usage limit has been reached. It resets in ~{_hours}h."
-                    else:
-                        status_hint = " Your plan's usage limit has been reached. Please wait until it resets."
-                else:
-                    status_hint = " You are being rate-limited. Please wait a moment and try again."
-            elif status_code == 529:
-                status_hint = " The API is temporarily overloaded. Please try again shortly."
-            elif status_code in {400, 500}:
-                # 400 with a large session is context overflow.
-                # 500 with a large session often means the payload is too large
-                # for the API to process — treat it the same way.
-                if _hist_len > 50:
-                    return (
-                        "⚠️ Session too large for the model's context window.\n"
-                        "Use /compact to compress the conversation, or "
-                        "/reset to start fresh."
-                    )
-                elif status_code == 400:
-                    status_hint = " The request was rejected by the API."
-            return (
-                f"Sorry, I encountered an unexpected error.{status_hint}\n"
-                "Try again or use /reset to start a fresh session."
+            return _gateway_unexpected_error_reply(
+                source.platform,
+                status_code=status_code,
+                history_len=_hist_len,
+                error=e,
             )
         finally:
             # Restore session context variables to their pre-handler state
@@ -11696,6 +11876,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             source.user_id,
         )
         allowed_preview = sorted(policy.user_allowed_commands)
+        if _is_weixin_platform(source.platform):
+            if allowed_preview:
+                suffix = (
+                    "你可以使用："
+                    + "、".join(f"/{c}" for c in allowed_preview[:12])
+                    + ("…" if len(allowed_preview) > 12 else "")
+                    + "。发送 /whoami 可以查看完整权限。"
+                )
+            else:
+                suffix = "这个命令只有管理员能用。请联系管理员开通权限。"
+            return f"⛔ /{canonical_cmd} 当前不可用。{suffix}"
         if allowed_preview:
             suffix = (
                 "You can run: "
@@ -13343,7 +13534,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         async def _on_confirm(choice: str):
             if choice == "cancel":
-                return f"🟡 /{command} cancelled. Conversation unchanged."
+                return _destructive_slash_cancelled_reply(event.source.platform, command)
             if choice == "always":
                 try:
                     from cli import save_config_value
@@ -13358,11 +13549,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
             result = await execute()
             if choice == "always":
-                note = (
-                    "\n\nℹ️ Future /clear, /new, /reset, and /undo will run "
-                    "without confirmation. Re-enable via "
-                    "`approvals.destructive_slash_confirm: true` in config.yaml."
-                )
+                note = _destructive_slash_opt_out_note(event.source.platform)
                 if isinstance(result, str):
                     return result + note
                 # EphemeralReply or other — leave untouched; the opt-out note
@@ -13372,14 +13559,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return result
 
         _p = self._typed_command_prefix_for(event.source.platform)
-        prompt_message = (
-            f"⚠️ **Confirm /{command}**\n\n"
-            f"{detail}\n\n"
-            "Choose:\n"
-            "• **Approve Once** — proceed this time only\n"
-            "• **Always Approve** — proceed and silence this prompt permanently\n"
-            "• **Cancel** — keep current conversation\n\n"
-            f"_Text fallback: reply `{_p}approve`, `{_p}always`, or `{_p}cancel`._"
+        prompt_message = _destructive_slash_prompt_message(
+            event.source.platform,
+            command=command,
+            detail=detail,
+            prefix=_p,
         )
         return await self._request_slash_confirm(
             event=event,
@@ -13781,14 +13965,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             except Exception as btn_err:
                                 logger.debug("Button-based update prompt failed: %s", btn_err)
                         if not sent_buttons:
-                            default_hint = f" (default: {default})" if default else ""
                             _p = getattr(adapter, "typed_command_prefix", "/")
                             await adapter.send(
                                 chat_id,
-                                f"⚕ **Update needs your input:**\n\n"
-                                f"{prompt_text}{default_hint}\n\n"
-                                f"Reply `{_p}approve` (yes) or `{_p}deny` (no), "
-                                f"or type your answer directly.",
+                                _gateway_update_prompt_message(
+                                    platform,
+                                    prompt=prompt_text,
+                                    default=default,
+                                    prefix=_p,
+                                ),
                                 metadata=_non_conversational_metadata(metadata, platform=platform),
                             )
                         # Keep the prompt marker on disk until the user

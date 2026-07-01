@@ -130,6 +130,43 @@ def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bo
     return True
 
 
+def _clarify_reply_instruction(platform) -> str:
+    if _platform_name(platform) == "weixin":
+        return "你可以直接回复序号、选项文字，或者自己补充说明。"
+    return "Reply with the number, the option text, or your own answer."
+
+
+def _delivery_failure_notice(platform) -> str:
+    if _platform_name(platform) == "weixin":
+        return "⚠️ 回复发送失败。你的请求已经处理过了，但结果没有成功发出来。可以再发一次试试。"
+    return (
+        "\u26a0\ufe0f Message delivery failed after multiple attempts. "
+        "Please try again \u2014 your request was processed but the response could not be sent."
+    )
+
+
+def _plain_text_fallback_content(platform, content: str) -> str:
+    if _platform_name(platform) == "weixin":
+        return f"回复格式处理失败，先用纯文本发给你：\n\n{content[:3500]}"
+    return f"(Response formatting failed, plain text:)\n\n{content[:3500]}"
+
+
+def _handler_error_notice(platform, error_type: str, error_detail: str) -> str:
+    if _platform_name(platform) == "weixin":
+        if error_detail == "no details available":
+            error_detail = "没有更多错误信息。"
+        return (
+            f"抱歉，处理时遇到错误（{error_type}）。\n"
+            f"{error_detail}\n"
+            "你可以再试一次，或发送 /reset 重新开始。"
+        )
+    return (
+        f"Sorry, I encountered an error ({error_type}).\n"
+        f"{error_detail}\n"
+        "Try again or use /reset to start a fresh session."
+    )
+
+
 def utf16_len(s: str) -> int:
     """Count UTF-16 code units in *s*.
 
@@ -3063,7 +3100,7 @@ class BasePlatformAdapter(ABC):
             for i, choice in enumerate(choices, start=1):
                 lines.append(f"  {i}. {choice}")
             lines.append("")
-            lines.append("Reply with the number, the option text, or your own answer.")
+            lines.append(_clarify_reply_instruction(getattr(self, "platform", None)))
             text = "\n".join(lines)
             # Text fallback: enable text-capture so the gateway intercept
             # picks up the user's typed reply (e.g. "2" or choice text).
@@ -4067,10 +4104,7 @@ class BasePlatformAdapter(ABC):
             else:
                 # All retries exhausted (loop completed without break) — notify user
                 logger.error("[%s] Failed to deliver response after %d retries: %s", self.name, max_retries, error_str)
-                notice = (
-                    "\u26a0\ufe0f Message delivery failed after multiple attempts. "
-                    "Please try again \u2014 your request was processed but the response could not be sent."
-                )
+                notice = _delivery_failure_notice(getattr(self, "platform", None))
                 try:
                     await self.send(chat_id=chat_id, content=notice, reply_to=reply_to, metadata=metadata)
                 except Exception as notify_err:
@@ -4081,7 +4115,7 @@ class BasePlatformAdapter(ABC):
         logger.warning("[%s] Send failed: %s — trying plain-text fallback", self.name, error_str)
         fallback_result = await self.send(
             chat_id=chat_id,
-            content=f"(Response formatting failed, plain text:)\n\n{content[:3500]}",
+            content=_plain_text_fallback_content(getattr(self, "platform", None), content),
             reply_to=reply_to,
             metadata=metadata,
         )
@@ -5145,10 +5179,10 @@ class BasePlatformAdapter(ABC):
                 _thread_metadata = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
                 await self.send(
                     chat_id=event.source.chat_id,
-                    content=(
-                        f"Sorry, I encountered an error ({error_type}).\n"
-                        f"{error_detail}\n"
-                        "Try again or use /reset to start a fresh session."
+                    content=_handler_error_notice(
+                        getattr(self, "platform", None),
+                        error_type,
+                        error_detail,
                     ),
                     metadata=_thread_metadata,
                 )
