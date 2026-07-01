@@ -277,6 +277,44 @@ async def test_status_command_includes_cached_agent_model_and_context():
 
 
 @pytest.mark.asyncio
+async def test_weixin_status_command_uses_public_friendly_chinese_summary():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source(Platform.WEIXIN)),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.WEIXIN,
+        chat_type="dm",
+        total_tokens=0,
+    )
+    runner = _make_runner(session_entry, platform=Platform.WEIXIN)
+    runner._session_db._db.get_session_title.return_value = "家庭旅行"
+    runner._session_db._db.get_session.return_value = {
+        "input_tokens": 1000,
+        "output_tokens": 250,
+        "model": "openai/gpt-test",
+        "billing_provider": "openai-codex",
+    }
+    runner._running_agents[build_session_key(_make_source(Platform.WEIXIN))] = SimpleNamespace(
+        model="openai/gpt-test",
+        provider="openai-codex",
+        context_compressor=SimpleNamespace(last_prompt_tokens=12_345, context_length=100_000),
+    )
+
+    result = await runner._handle_message(_make_event("/status", platform=Platform.WEIXIN))
+
+    assert result.startswith("📌 当前状态")
+    assert "对话：家庭旅行" in result
+    assert "状态：正在处理你的消息" in result
+    assert "想重新开始，发送 /new。" in result
+    assert "Model" not in result
+    assert "Provider" not in result
+    assert "Context" not in result
+    assert "tokens" not in result
+    assert "sess-1" not in result
+
+
+@pytest.mark.asyncio
 async def test_agents_command_reports_active_agents_and_processes(monkeypatch):
     session_key = build_session_key(_make_source())
     session_entry = SessionEntry(

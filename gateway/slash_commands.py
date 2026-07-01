@@ -96,6 +96,24 @@ def _friendly_weixin_reset_reply(
     return "\n\n".join(lines)
 
 
+def _friendly_weixin_status_reply(
+    *, title: Optional[str] = None, is_running: bool = False, queue_depth: int = 0
+) -> str:
+    """Return a public-user-friendly Weixin status summary."""
+    clean_title = str(title or "").strip()
+    conversation = clean_title or "当前对话"
+    state = "正在处理你的消息" if is_running else "可以继续提问"
+    lines = [
+        "📌 当前状态",
+        f"对话：{conversation}",
+        f"状态：{state}",
+    ]
+    if queue_depth:
+        lines.append(f"排队：还有 {queue_depth} 条消息等待处理")
+    lines.append("想重新开始，发送 /new。")
+    return "\n\n".join(lines)
+
+
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
@@ -636,6 +654,12 @@ class GatewaySlashCommandsMixin:
         ])
         if queue_depth:
             lines.append(t("gateway.status.queued", count=queue_depth))
+        if source.platform == Platform.WEIXIN:
+            return _friendly_weixin_status_reply(
+                title=title,
+                is_running=is_running,
+                queue_depth=queue_depth,
+            )
         if source.platform == Platform.MATRIX:
             adapter = self.adapters.get(Platform.MATRIX)
             scope = getattr(adapter, "_matrix_session_scope", os.getenv("MATRIX_SESSION_SCOPE", "auto"))

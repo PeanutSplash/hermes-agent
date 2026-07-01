@@ -350,8 +350,106 @@ def _redact_approval_command(cmd: "str | None") -> str:
     return redact_sensitive_text(str(cmd or ""), force=True)
 
 
-def _gateway_provider_error_reply(text: str) -> str:
-    """Map raw provider/API errors to a short user-safe Telegram reply."""
+def _is_weixin_platform(platform: Any) -> bool:
+    return _gateway_platform_value(platform) == "weixin"
+
+
+def _weixin_provider_error_reply(text: str) -> str:
+    """Map raw provider/API errors to a public-friendly Weixin reply."""
+    if _GATEWAY_AUTH_ERROR_RE.search(text):
+        return "⚠️ 服务暂时无法连接，请稍后再试。"
+    if _GATEWAY_PROVIDER_POLICY_RE.search(text):
+        return "⚠️ 这次内容没有发送成功。可以换个说法再试一次。"
+    if _GATEWAY_RATE_LIMIT_RE.search(text):
+        return "⏱️ 当前请求较多，请稍等一会儿再试。"
+    return "⚠️ 服务暂时不稳定，请稍后再试。"
+
+
+def _weixin_long_running_notice(elapsed_mins: int) -> str:
+    minutes = max(1, int(elapsed_mins or 0))
+    return f"⏳ 我还在处理，已用约 {minutes} 分钟。"
+
+
+def _weixin_inactivity_warning(elapsed_mins: int) -> str:
+    minutes = max(1, int(elapsed_mins or 0))
+    return (
+        f"⚠️ 我这边已经约 {minutes} 分钟没有新的进展。\n\n"
+        "可能是网络或服务响应较慢。你可以继续等待，也可以发送 /new 重新开始。"
+    )
+
+
+def _weixin_inactivity_timeout_reply() -> str:
+    return (
+        "抱歉，这次处理时间太长，已经自动停止。\n\n"
+        "你可以换个更简单的说法再试一次，或发送 /new 重新开始。"
+    )
+
+
+def _weixin_status_action_label(action: str) -> str:
+    normalized = str(action or "").strip().lower()
+    if "restart" in normalized:
+        return "重启"
+    if "shut" in normalized or "stop" in normalized:
+        return "关闭"
+    return "维护"
+
+
+def _weixin_gateway_draining_reply(action: str, *, queued: bool, new_work: bool = False) -> str:
+    label = _weixin_status_action_label(action)
+    if queued:
+        return f"⏳ 服务正在{label}，我会在恢复后继续处理这条消息。"
+    noun = "新消息" if new_work else "这条消息"
+    return f"⏳ 服务正在{label}，暂时不能处理{noun}。请稍后再试。"
+
+
+def _weixin_queue_usage_reply() -> str:
+    return "用法：/queue 你想稍后让我处理的内容"
+
+
+def _weixin_queue_command_reply(depth: int) -> str:
+    if depth <= 1:
+        return "已收到，我会在当前任务结束后继续处理。"
+    return f"已收到，我会在当前任务结束后继续处理。\n\n当前还有 {depth} 条消息等待处理。"
+
+
+def _weixin_steer_usage_reply() -> str:
+    return "用法：/steer 你想补充给当前任务的说明"
+
+
+def _weixin_busy_command_blocked_reply(command: Optional[str] = None) -> str:
+    if command:
+        return (
+            f"我正在处理上一条消息，暂时不能执行 /{command}。\n\n"
+            "请等这次回复结束，或发送 /stop 停止后再试。"
+        )
+    return "我正在处理上一条消息。请等这次回复结束，或发送 /stop 停止后再试。"
+
+
+def _weixin_busy_ack_reply(*, is_steer_mode: bool, is_queue_mode: bool, demoted_for_subagents: bool) -> str:
+    if is_steer_mode:
+        return "已收到补充，我会尽量加入当前处理中。"
+    if is_queue_mode and demoted_for_subagents:
+        return (
+            "我正在处理一个较长任务，已把你的新消息排队。\n\n"
+            "当前任务结束后我会继续回复；如果想取消当前任务，发送 /stop。"
+        )
+    if is_queue_mode:
+        return "已收到，我正在处理上一条消息。\n\n当前任务结束后，我会继续回复这条。"
+    return "收到，我会先停止当前任务，然后处理你的新消息。"
+
+
+def _should_suppress_weixin_busy_ack(event: MessageEvent) -> bool:
+    if not _is_weixin_platform(event.source.platform):
+        return False
+    if event.message_type != MessageType.TEXT:
+        return False
+    return not bool(event.get_command())
+
+
+def _gateway_provider_error_reply(text: str, platform: Any = None) -> str:
+    """Map raw provider/API errors to a short user-safe chat reply."""
+    if _is_weixin_platform(platform):
+        return _weixin_provider_error_reply(text)
     if _GATEWAY_AUTH_ERROR_RE.search(text):
         return (
             "⚠️ Provider authentication failed. Check the configured credentials; "
@@ -425,7 +523,7 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
     if _looks_like_gateway_provider_error(redacted):
-        return _gateway_provider_error_reply(redacted)
+        return _gateway_provider_error_reply(redacted, platform=platform)
     return redacted
 
 
@@ -445,7 +543,7 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     if _TELEGRAM_NOISY_STATUS_RE.search(text):
         return None
     if _looks_like_gateway_provider_error(text):
-        return _gateway_provider_error_reply(text)
+        return _gateway_provider_error_reply(text, platform=platform)
     return text
 
 
@@ -4726,9 +4824,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
             if self._queue_during_drain_enabled():
                 self._queue_or_replace_pending_event(session_key, event)
-                message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
+                if _is_weixin_platform(event.source.platform):
+                    message = _weixin_gateway_draining_reply(self._status_action_gerund(), queued=True)
+                else:
+                    message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
             else:
-                message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
+                if _is_weixin_platform(event.source.platform):
+                    message = _weixin_gateway_draining_reply(self._status_action_gerund(), queued=False)
+                else:
+                    message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
 
             await adapter._send_with_retry(
                 chat_id=event.source.chat_id,
@@ -4928,6 +5032,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not busy_ack_enabled:
             logger.debug("Busy ack suppressed for session %s", session_key)
             return True  # input still processed, just no ack sent
+        if _should_suppress_weixin_busy_ack(event):
+            logger.debug("Weixin busy ack suppressed for plain text follow-up in session %s", session_key)
+            return True
 
         # Debounce: only send an acknowledgment once every 30 seconds per session
         # to avoid spamming the user when they send multiple messages quickly
@@ -4973,28 +5080,56 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
         if is_steer_mode:
-            message = (
-                f"⏩ Steered into current run{status_detail}. "
-                f"Your message arrives after the next tool call."
-            )
+            if _is_weixin_platform(event.source.platform):
+                message = _weixin_busy_ack_reply(
+                    is_steer_mode=True,
+                    is_queue_mode=False,
+                    demoted_for_subagents=False,
+                )
+            else:
+                message = (
+                    f"⏩ Steered into current run{status_detail}. "
+                    f"Your message arrives after the next tool call."
+                )
         elif is_queue_mode and demoted_for_subagents:
             # #30170 — explain the demotion so the user knows their
             # follow-up didn't accidentally kill the subagent and
             # discovers `/stop` as the explicit escape hatch.
-            message = (
-                f"⏳ Subagent working{status_detail} — your message is queued for "
-                f"when it finishes (use /stop to cancel everything)."
-            )
+            if _is_weixin_platform(event.source.platform):
+                message = _weixin_busy_ack_reply(
+                    is_steer_mode=False,
+                    is_queue_mode=True,
+                    demoted_for_subagents=True,
+                )
+            else:
+                message = (
+                    f"⏳ Subagent working{status_detail} — your message is queued for "
+                    f"when it finishes (use /stop to cancel everything)."
+                )
         elif is_queue_mode:
-            message = (
-                f"⏳ Queued for the next turn{status_detail}. "
-                f"I'll respond once the current task finishes."
-            )
+            if _is_weixin_platform(event.source.platform):
+                message = _weixin_busy_ack_reply(
+                    is_steer_mode=False,
+                    is_queue_mode=True,
+                    demoted_for_subagents=False,
+                )
+            else:
+                message = (
+                    f"⏳ Queued for the next turn{status_detail}. "
+                    f"I'll respond once the current task finishes."
+                )
         else:
-            message = (
-                f"⚡ Interrupting current task{status_detail}. "
-                f"I'll respond to your message shortly."
-            )
+            if _is_weixin_platform(event.source.platform):
+                message = _weixin_busy_ack_reply(
+                    is_steer_mode=False,
+                    is_queue_mode=False,
+                    demoted_for_subagents=False,
+                )
+            else:
+                message = (
+                    f"⚡ Interrupting current task{status_detail}. "
+                    f"I'll respond to your message shortly."
+                )
 
         # First-touch onboarding: the very first time a user sends a message
         # while the agent is busy, append a one-time hint explaining the
@@ -8478,6 +8613,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # fields silently lost the attachment when the queued turn ran.
                 has_media = bool(getattr(event, "media_urls", None))
                 if not queued_text and not has_media:
+                    if _is_weixin_platform(source.platform):
+                        return _weixin_queue_usage_reply()
                     return "Usage: /queue <prompt>"
                 adapter = self.adapters.get(source.platform)
                 if adapter:
@@ -8501,6 +8638,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     self._enqueue_fifo(_quick_key, queued_event, adapter)
                 depth = self._queue_depth(_quick_key, adapter=self.adapters.get(source.platform))
+                if _is_weixin_platform(source.platform):
+                    return _weixin_queue_command_reply(depth)
                 if depth <= 1:
                     return "Queued for the next turn."
                 return f"Queued for the next turn. ({depth} queued)"
@@ -8513,6 +8652,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "steer":
                 steer_text = event.get_command_args().strip()
                 if not steer_text:
+                    if _is_weixin_platform(source.platform):
+                        return _weixin_steer_usage_reply()
                     return "Usage: /steer <prompt>"
                 running_agent = self._running_agents.get(_quick_key)
                 if running_agent is _AGENT_PENDING_SENTINEL:
@@ -8527,16 +8668,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             channel_prompt=event.channel_prompt,
                         )
                         adapter._pending_messages[_quick_key] = queued_event
+                    if _is_weixin_platform(source.platform):
+                        return "我还在准备处理当前任务，已把这条补充排到下一轮。"
                     return "Agent still starting — /steer queued for the next turn."
                 if running_agent and hasattr(running_agent, "steer"):
                     try:
                         accepted = running_agent.steer(steer_text)
                     except Exception as exc:
                         logger.warning("Steer failed for session %s: %s", _quick_key, exc)
+                        if _is_weixin_platform(source.platform):
+                            return "⚠️ 这条补充没有加入成功，请稍后再试。"
                         return f"⚠️ Steer failed: {exc}"
                     if accepted:
                         preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
+                        if _is_weixin_platform(source.platform):
+                            return f"已收到补充：{preview}"
                         return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
+                    if _is_weixin_platform(source.platform):
+                        return "这条补充内容为空，没有加入。"
                     return "Steer rejected (empty payload)."
                 # Running agent is missing or lacks steer() — fall back to queue.
                 adapter = self.adapters.get(source.platform)
@@ -8549,15 +8698,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         channel_prompt=event.channel_prompt,
                     )
                     adapter._pending_messages[_quick_key] = queued_event
+                if _is_weixin_platform(source.platform):
+                    return "当前没有正在处理的任务，已把这条补充排到下一轮。"
                 return "No active agent — /steer queued for the next turn."
 
             # /model must not be used while the agent is running.
             if _cmd_def_inner and _cmd_def_inner.name == "model":
+                if _is_weixin_platform(source.platform):
+                    return _weixin_busy_command_blocked_reply("model")
                 return "Agent is running — wait or /stop first, then switch models."
 
             # /codex-runtime must not be used while the agent is running.
             # Switching mid-turn would split a turn across two transports.
             if _cmd_def_inner and _cmd_def_inner.name == "codex-runtime":
+                if _is_weixin_platform(source.platform):
+                    return _weixin_busy_command_blocked_reply("codex-runtime")
                 return ("Agent is running — wait or /stop first, then "
                         "change runtime.")
 
@@ -8606,9 +8761,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 if _is_control:
                     return await self._handle_goal_command(event)
+                if _is_weixin_platform(source.platform):
+                    return _weixin_busy_command_blocked_reply("goal")
                 return "Agent is running — use /goal status / pause / clear / wait mid-run, or /stop before setting a new goal."
 
             if _cmd_def_inner and _cmd_def_inner.name == "moa":
+                if _is_weixin_platform(source.platform):
+                    return _weixin_busy_command_blocked_reply("moa")
                 return "Agent is running — wait or /stop first, then run /moa."
 
             # /subgoal is safe mid-run — it only modifies the goal's
@@ -8657,6 +8816,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # silently discarded by the slash-command safety net,
             # producing a zero-char response. See #5057, #6252, #10370.
             if _cmd_def_inner:
+                if _is_weixin_platform(source.platform):
+                    return _weixin_busy_command_blocked_reply(_cmd_def_inner.name)
                 return (
                     f"⏳ Agent is running — `/{_cmd_def_inner.name}` can't run "
                     f"mid-turn. Wait for the current response or `/stop` first."
@@ -8705,6 +8866,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Force-clean the sentinel so the session is unlocked.
                     self._release_running_agent_state(_quick_key)
                     logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
+                    if _is_weixin_platform(source.platform):
+                        return EphemeralReply("已停止。刚才还在准备阶段，现在可以重新发送消息。")
                     return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
                 # Queue the message so it will be picked up after the
                 # agent starts.
@@ -8720,6 +8883,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if self._draining:
                 if self._queue_during_drain_enabled():
                     self._queue_or_replace_pending_event(_quick_key, event)
+                if _is_weixin_platform(source.platform):
+                    return _weixin_gateway_draining_reply(
+                        self._status_action_gerund(),
+                        queued=self._queue_during_drain_enabled(),
+                    )
                 return (
                     f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
                     if self._queue_during_drain_enabled()
@@ -9103,6 +9271,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # message. If the payload is empty, surface the usage hint.
             steer_payload = event.get_command_args().strip()
             if not steer_payload:
+                if _is_weixin_platform(source.platform):
+                    return "用法：/steer 你想让我处理的内容"
                 return "Usage: /steer <prompt>  (no agent is running; sending as a normal message)"
             try:
                 event.text = steer_payload
@@ -9157,6 +9327,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return await self._handle_voice_command(event)
 
         if self._draining:
+            if _is_weixin_platform(source.platform):
+                return _weixin_gateway_draining_reply(
+                    self._status_action_gerund(),
+                    queued=False,
+                    new_work=True,
+                )
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
 
         # User-defined quick commands (bypass agent loop, no LLM call)
@@ -17632,7 +17808,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
-                _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                if source.platform == Platform.WEIXIN:
+                    _heartbeat_text = _weixin_long_running_notice(_elapsed_mins)
+                else:
+                    _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
                 try:
                     _notify_res = None
                     if _heartbeat_msg_id:
@@ -17763,12 +17942,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _elapsed_warn = int(_agent_warning // 60) or 1
                             _remaining_mins = int((_agent_timeout - _agent_warning) // 60) or 1
                             try:
+                                if source.platform == Platform.WEIXIN:
+                                    _warning_text = _weixin_inactivity_warning(_elapsed_warn)
+                                else:
+                                    _warning_text = (
+                                        f"⚠️ No activity for {_elapsed_warn} min. "
+                                        f"If the agent does not respond soon, it will "
+                                        f"be timed out in {_remaining_mins} min. "
+                                        f"You can continue waiting or use /reset."
+                                    )
                                 await _warn_adapter.send(
                                     source.chat_id,
-                                    f"⚠️ No activity for {_elapsed_warn} min. "
-                                    f"If the agent does not respond soon, it will "
-                                    f"be timed out in {_remaining_mins} min. "
-                                    f"You can continue waiting or use /reset.",
+                                    _warning_text,
                                     metadata=_status_thread_metadata,
                                 )
                             except Exception as _warn_err:
@@ -17848,8 +18033,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "Try again, or use /reset to start fresh."
                 )
 
+                _final_response = (
+                    _weixin_inactivity_timeout_reply()
+                    if source.platform == Platform.WEIXIN
+                    else "\n".join(_diag_lines)
+                )
                 response = {
-                    "final_response": "\n".join(_diag_lines),
+                    "final_response": _final_response,
                     "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                     "api_calls": _iter_n,
                     "tools": tools_holder[0] or [],

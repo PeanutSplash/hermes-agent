@@ -8,6 +8,7 @@ import pytest
 
 import gateway.run as gateway_run
 from agent.i18n import t
+from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
 from gateway.session import SessionEntry, build_session_key
@@ -87,6 +88,27 @@ async def test_draining_rejects_new_session_messages():
     result = await runner._handle_message(event)
 
     assert result == "⏳ Gateway is restarting and is not accepting new work right now."
+
+
+@pytest.mark.asyncio
+async def test_weixin_draining_rejects_new_session_messages_in_chinese():
+    runner, _adapter = make_restart_runner()
+    runner._draining = True
+    runner._restart_requested = True
+
+    source = make_restart_source("fresh")
+    source.platform = Platform.WEIXIN
+    event = MessageEvent(
+        text="你好",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="m4",
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "⏳ 服务正在重启，暂时不能处理新消息。请稍后再试。"
+    assert "Gateway is" not in result
 
 
 def test_load_busy_input_mode_prefers_env_then_config_then_default(tmp_path, monkeypatch):

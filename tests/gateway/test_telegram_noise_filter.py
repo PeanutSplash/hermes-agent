@@ -6,6 +6,9 @@ from gateway.config import Platform
 from gateway.run import (
     _prepare_gateway_status_message,
     _sanitize_gateway_final_response,
+    _weixin_inactivity_timeout_reply,
+    _weixin_inactivity_warning,
+    _weixin_long_running_notice,
 )
 
 # Every human-facing chat surface that must receive noise-filtered,
@@ -173,6 +176,35 @@ def test_telegram_final_response_sanitizes_raw_provider_errors():
     assert "cybersecurity risk" not in sanitized.lower()
     assert "HTTP 400" not in sanitized
     assert "req_abc" not in sanitized
+
+
+def test_weixin_final_response_sanitizes_provider_errors_in_chinese():
+    raw = (
+        "API call failed after 3 retries: HTTP 401 Unauthorized — "
+        "Authorization: Bearer sk-ABCDEF0123456789abcdef0123"
+    )
+
+    sanitized = _sanitize_gateway_final_response(Platform.WEIXIN, raw)
+
+    assert "sk-ABCDEF" not in sanitized
+    assert "HTTP 401" not in sanitized
+    assert "Provider" not in sanitized
+    assert "服务" in sanitized
+    assert "请稍后再试" in sanitized
+
+
+def test_weixin_runtime_notices_are_public_friendly_chinese():
+    assert _weixin_long_running_notice(3) == "⏳ 我还在处理，已用约 3 分钟。"
+    warning = _weixin_inactivity_warning(15)
+    timeout = _weixin_inactivity_timeout_reply()
+
+    assert "15 分钟" in warning
+    assert "继续等待" in warning
+    assert "/new" in warning
+    assert "处理时间太长" in timeout
+    assert "/new" in timeout
+    assert "agent" not in warning.lower()
+    assert "gateway_timeout" not in timeout
 
 
 def test_telegram_final_response_redacts_auth_secrets():

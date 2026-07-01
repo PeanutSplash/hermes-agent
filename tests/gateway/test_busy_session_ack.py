@@ -174,7 +174,7 @@ class TestBusySessionAck:
     @pytest.mark.asyncio
     async def test_sends_ack_when_agent_running(self):
         """First message during busy session should get a status ack."""
-        runner, sentinel = _make_runner()
+        runner, _sentinel = _make_runner()
         runner._busy_input_mode = "interrupt"
         adapter = _make_adapter()
 
@@ -212,9 +212,37 @@ class TestBusySessionAck:
         agent.interrupt.assert_called_once_with("Are you working?")
 
     @pytest.mark.asyncio
+    async def test_weixin_plain_text_followup_suppresses_busy_ack(self):
+        """Weixin users often split one thought across messages; keep that silent."""
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        adapter = _make_adapter("weixin")
+
+        event = _make_event(text="还在吗？", platform_val="weixin")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 21,
+            "max_iterations": 60,
+            "current_tool": "terminal",
+            "last_activity_ts": time.time(),
+            "last_activity_desc": "terminal",
+            "seconds_since_activity": 1.0,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time() - 600
+        runner.adapters[event.source.platform] = adapter
+
+        await runner._handle_active_session_busy_message(event, sk)
+
+        adapter._send_with_retry.assert_not_called()
+        agent.interrupt.assert_called_once_with("还在吗？")
+
+    @pytest.mark.asyncio
     async def test_queue_mode_suppresses_interrupt_and_updates_ack(self):
         """When busy_input_mode is 'queue', message is queued WITHOUT interrupt."""
-        runner, sentinel = _make_runner()
+        runner, _sentinel = _make_runner()
         runner._busy_input_mode = "queue"
         adapter = _make_adapter()
 
@@ -238,6 +266,29 @@ class TestBusySessionAck:
         assert "Queued for the next turn" in content
         assert "respond once the current task finishes" in content
         assert "Interrupting" not in content
+
+    @pytest.mark.asyncio
+    async def test_weixin_queue_mode_plain_text_followup_suppresses_busy_ack(self):
+        runner, sentinel = _make_runner()
+        runner._busy_input_mode = "queue"
+        adapter = _make_adapter("weixin")
+
+        event = _make_event(text="再补充一点", platform_val="weixin")
+        sk = build_session_key(event.source)
+        runner.adapters[event.source.platform] = adapter
+
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 2,
+            "max_iterations": 60,
+            "current_tool": "browser",
+        }
+        runner._running_agents[sk] = agent
+
+        await runner._handle_active_session_busy_message(event, sk)
+
+        adapter._send_with_retry.assert_not_called()
+        agent.interrupt.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_busy_text_mode_queue_delegates_to_adapter_handle_message(self):

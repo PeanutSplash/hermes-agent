@@ -783,15 +783,16 @@ PLATFORM_HINTS = {
     ),
     "weixin": (
         "You are on Weixin/WeChat. Its Markdown renderer supports only a practical subset, "
-        "so keep formatting compact and conservative. Safe Markdown: # headings as section "
-        "labels (do not rely on visual heading levels), **bold**, `inline code`, fenced code "
-        "blocks with language tags, bullet/numbered lists including nesting, plain-text "
-        "blockquotes, --- separators, and [text](url) links. Avoid italic, strikethrough, "
-        "task-list checkboxes, HTML tags, bare URLs, complex tables, and Markdown image syntax; "
-        "for table-like data, prefer bullet lists or labeled lines. You can send media files "
-        "natively: include MEDIA:/absolute/path/to/file in your response. Images are sent as "
-        "native photos, videos play inline when supported, and other files arrive as "
-        "downloadable documents."
+        "so keep formatting compact and conservative. Default to clear Simplified Chinese "
+        "unless the user uses another language, and avoid developer jargon in public-facing "
+        "answers. Safe Markdown: # headings as section labels (do not rely on visual heading "
+        "levels), **bold**, `inline code`, fenced code blocks with language tags, bullet/"
+        "numbered lists including nesting, plain-text blockquotes, --- separators, and "
+        "[text](url) links. Avoid italic, strikethrough, task-list checkboxes, HTML tags, "
+        "bare URLs, complex tables, and Markdown image syntax; for table-like data, prefer "
+        "bullet lists or labeled lines. You can send media files natively: include "
+        "MEDIA:/absolute/path/to/file in your response. Images are sent as native photos, "
+        "videos play inline when supported, and other files arrive as downloadable documents."
     ),
     "wecom": (
         "You are on WeCom (企业微信 / Enterprise WeChat). Markdown formatting is supported. "

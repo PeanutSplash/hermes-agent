@@ -1125,6 +1125,8 @@ class TestPromptBuilderConstants:
         hint = PLATFORM_HINTS["weixin"]
         lowered = hint.lower()
         assert "weixin" in lowered or "wechat" in lowered
+        assert "simplified chinese" in lowered
+        assert "developer jargon" in lowered
         assert "safe markdown" in lowered
         assert "**bold**" in hint
         assert "fenced code" in lowered
@@ -1660,4 +1662,3 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
