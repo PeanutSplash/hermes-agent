@@ -438,10 +438,11 @@ def _weixin_busy_ack_reply(*, is_steer_mode: bool, is_queue_mode: bool, demoted_
     return "收到，我会先停止当前任务，然后处理你的新消息。"
 
 
-def _should_suppress_weixin_busy_ack(event: MessageEvent) -> bool:
+def _should_suppress_weixin_busy_ack(event: Any) -> bool:
     if not _is_weixin_platform(event.source.platform):
         return False
-    if event.message_type != MessageType.TEXT:
+    message_type = getattr(event, "message_type", None)
+    if str(getattr(message_type, "value", message_type) or "").lower() != "text":
         return False
     return not bool(event.get_command())
 
