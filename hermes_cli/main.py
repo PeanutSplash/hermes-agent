@@ -9458,6 +9458,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         print("→ Pulling updates...")
         update_succeeded = False
+        code_changed_by_update = True
         # Capture the pre-pull SHA so we can auto-roll-back if the new code
         # has a syntax error in a critical-path file (PR #28452 incident:
         # orphan merge-conflict markers in hermes_cli/config.py bricked
@@ -9535,6 +9536,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 sys.exit(1)
 
             update_succeeded = True
+            post_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
+            if pre_pull_sha and post_pull_sha and pre_pull_sha == post_pull_sha:
+                code_changed_by_update = False
         finally:
             if auto_stash_ref is not None:
                 # Don't attempt stash restore if the code update itself failed —
@@ -10016,6 +10020,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 _exit_code_path.write_text("0")
             except OSError:
                 pass
+
+        if not code_changed_by_update:
+            print()
+            print("→ Code did not change; skipping gateway restart.")
+            _resume_windows_gateways_after_update(_windows_gateway_resume)
+            return
 
         # Auto-restart ALL gateways after update.
         # The code update (git pull) is shared across all profiles, so every

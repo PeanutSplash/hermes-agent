@@ -483,6 +483,24 @@ def _weixin_gateway_draining_reply(action: str, *, queued: bool, new_work: bool 
     return f"⏳ 服务正在{label}，暂时不能处理{noun}。请稍后再试。"
 
 
+def _gateway_shutdown_notice(platform: Any, *, restarting: bool) -> str:
+    if _is_weixin_platform(platform):
+        if restarting:
+            return (
+                "⚠️ 服务正在重启，当前任务会被中断。\n\n"
+                "重启后你发任意消息，我会尽量从刚才的位置继续。"
+            )
+        return "⚠️ 服务正在关闭，当前任务会被中断。"
+    action = "restarting" if restarting else "shutting down"
+    hint = (
+        "Your current task will be interrupted. "
+        "Send any message after restart and I'll try to resume where you left off."
+        if restarting
+        else "Your current task will be interrupted."
+    )
+    return f"⚠️ Gateway {action} — {hint}"
+
+
 def _weixin_queue_usage_reply() -> str:
     return "用法：/queue 你想稍后让我处理的内容"
 
@@ -5336,15 +5354,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         active = self._snapshot_running_agents()
         restart_source = self._restart_command_source if self._restart_requested else None
 
-        action = "restarting" if self._restart_requested else "shutting down"
-        hint = (
-            "Your current task will be interrupted. "
-            "Send any message after restart and I'll try to resume where you left off."
-            if self._restart_requested
-            else "Your current task will be interrupted."
-        )
-        msg = f"⚠️ Gateway {action} — {hint}"
-
         notified: set[tuple[str, str, Optional[str]]] = set()
         for session_key in active:
             source = None
@@ -5418,6 +5427,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter=adapter,
                 )
 
+                msg = _gateway_shutdown_notice(
+                    platform, restarting=self._restart_requested
+                )
                 result = await adapter.send(chat_id, msg, metadata=metadata)
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
@@ -5497,6 +5509,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     home.chat_id,
                     home.thread_id,
                     adapter=adapter,
+                )
+                msg = _gateway_shutdown_notice(
+                    platform, restarting=self._restart_requested
                 )
                 if metadata:
                     result = await adapter.send(str(home.chat_id), msg, metadata=metadata)

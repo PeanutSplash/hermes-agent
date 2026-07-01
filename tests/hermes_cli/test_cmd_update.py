@@ -9,8 +9,14 @@ import pytest
 from hermes_cli.main import cmd_update, PROJECT_ROOT
 
 
-def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
+def _make_run_side_effect(
+    branch="main",
+    verify_ok=True,
+    commit_count="0",
+    head_shas=None,
+):
     """Build a side_effect function for subprocess.run that simulates git commands."""
+    head_iter = iter(head_shas or [])
 
     def side_effect(cmd, **kwargs):
         joined = " ".join(str(c) for c in cmd)
@@ -18,6 +24,14 @@ def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
         # git rev-parse --abbrev-ref HEAD  (get current branch)
         if "rev-parse" in joined and "--abbrev-ref" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{branch}\n", stderr="")
+
+        # git rev-parse HEAD  (capture before/after update revision)
+        if "rev-parse" in joined and "HEAD" in joined:
+            try:
+                sha = next(head_iter)
+            except StopIteration:
+                sha = ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{sha}\n", stderr="")
 
         # git rev-parse --verify origin/{branch}  (check remote branch exists)
         if "rev-parse" in joined and "--verify" in joined:
@@ -222,6 +236,26 @@ class TestCmdUpdateBranchFallback:
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
         pull_cmds = [c for c in commands if "pull" in c]
         assert len(pull_cmds) == 0
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_update_skips_gateway_restart_when_head_does_not_change(
+        self, mock_run, _mock_which, mock_args, capsys
+    ):
+        mock_run.side_effect = _make_run_side_effect(
+            branch="main",
+            verify_ok=True,
+            commit_count="1",
+            head_shas=["same-sha", "same-sha"],
+        )
+
+        with patch("tools.skills_sync.sync_skills", return_value={"copied": []}), \
+             patch("hermes_cli.gateway.find_gateway_pids") as find_gateway_pids:
+            cmd_update(mock_args)
+
+        find_gateway_pids.assert_not_called()
+        captured = capsys.readouterr()
+        assert "Code did not change; skipping gateway restart." in captured.out
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")

@@ -11,7 +11,7 @@ from agent.i18n import t
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.restart import DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
-from gateway.session import SessionEntry, build_session_key
+from gateway.session import SessionEntry, SessionSource, build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
 
@@ -449,6 +449,48 @@ async def test_shutdown_notification_says_restarting_when_restart_requested():
     assert len(adapter.sent) == 1
     assert "restarting" in adapter.sent[0]
     assert "resume" in adapter.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_notification_is_chinese_for_weixin_active_session():
+    runner, adapter = make_restart_runner()
+    source = SessionSource(
+        platform=Platform.WEIXIN,
+        chat_id="wxid_1",
+        chat_type="dm",
+        user_id="u1",
+    )
+    session_key = build_session_key(source)
+    runner._running_agents[session_key] = MagicMock()
+    runner._cache_session_source(session_key, source)
+    runner.adapters[Platform.WEIXIN] = adapter
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert adapter.sent == ["⚠️ 服务正在关闭，当前任务会被中断。"]
+
+
+@pytest.mark.asyncio
+async def test_restart_notification_is_chinese_for_weixin_active_session():
+    runner, adapter = make_restart_runner()
+    runner._restart_requested = True
+    source = SessionSource(
+        platform=Platform.WEIXIN,
+        chat_id="wxid_1",
+        chat_type="dm",
+        user_id="u1",
+    )
+    session_key = build_session_key(source)
+    runner._running_agents[session_key] = MagicMock()
+    runner._cache_session_source(session_key, source)
+    runner.adapters[Platform.WEIXIN] = adapter
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert adapter.sent == [
+        "⚠️ 服务正在重启，当前任务会被中断。\n\n"
+        "重启后你发任意消息，我会尽量从刚才的位置继续。"
+    ]
 
 
 @pytest.mark.asyncio
