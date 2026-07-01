@@ -58,6 +58,7 @@ from agent.i18n import t
 from agent.presentation_policy import PresentationPolicy, resolve_presentation_policy
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
+from gateway.display_config import resolve_display_setting
 
 # --- Agent cache tuning ---------------------------------------------------
 # Bounds the per-session AIAgent cache to prevent unbounded growth in
@@ -363,6 +364,52 @@ def _presentation_policy_for_platform(platform: Any) -> PresentationPolicy:
     return resolve_presentation_policy(cfg, platform)
 
 
+def _display_setting_explicit(user_config: dict, platform_key: str, setting: str) -> bool:
+    display_cfg = user_config.get("display") if isinstance(user_config, dict) else {}
+    if not isinstance(display_cfg, dict):
+        return False
+    if display_cfg.get(setting) is not None:
+        return True
+    platform_cfg = (display_cfg.get("platforms") or {}).get(platform_key)
+    return isinstance(platform_cfg, dict) and platform_cfg.get(setting) is not None
+
+
+def _long_running_notification_schedule(
+    user_config: dict,
+    platform: Any,
+    interval_raw: float,
+) -> tuple[float | None, float | None, PresentationPolicy]:
+    policy = resolve_presentation_policy(user_config, platform)
+    if interval_raw <= 0:
+        return None, None, policy
+
+    platform_key = _gateway_platform_value(platform)
+    enabled = bool(
+        resolve_display_setting(
+            user_config,
+            platform_key,
+            "long_running_notifications",
+            True,
+        )
+    )
+    if (
+        not enabled
+        and not _display_setting_explicit(user_config, platform_key, "long_running_notifications")
+        and policy.progress_notice_style == "summary"
+    ):
+        enabled = True
+    if not enabled:
+        return None, None, policy
+
+    if policy.progress_notice_style == "summary":
+        return (
+            float(policy.long_task_notice_delay_seconds or interval_raw),
+            float(policy.long_task_heartbeat_seconds or interval_raw),
+            policy,
+        )
+    return float(interval_raw), float(interval_raw), policy
+
+
 def _weixin_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a public-friendly Weixin reply."""
     if _GATEWAY_AUTH_ERROR_RE.search(text):
@@ -377,6 +424,31 @@ def _weixin_provider_error_reply(text: str) -> str:
 def _weixin_long_running_notice(elapsed_mins: int) -> str:
     minutes = max(1, int(elapsed_mins or 0))
     return f"⏳ 我还在处理，已用约 {minutes} 分钟。"
+
+
+def _public_progress_stage_label(activity: Any) -> str:
+    text = str(activity or "").strip().lower()
+    if not text:
+        return ""
+    if any(token in text for token in ("web_search", "browser", "search", "fetch", "http")):
+        return "查找资料"
+    if any(token in text for token in ("terminal", "shell", "execute", "install", "pip", "npm", "uv", "git")):
+        return "准备或执行操作"
+    if any(token in text for token in ("read_file", "file", "csv", "json", "sqlite", "database")):
+        return "读取和整理数据"
+    if any(token in text for token in ("test", "pytest", "verify", "check")):
+        return "验证结果"
+    return ""
+
+
+def _public_progress_notice(*, elapsed_seconds: float, activity: Any = None, first: bool = False) -> str:
+    if first:
+        return "收到，我正在处理，可能需要一会儿。"
+    minutes = max(1, int(elapsed_seconds // 60) or 1)
+    stage = _public_progress_stage_label(activity)
+    if stage:
+        return f"还在处理，当前在{stage}，已用约 {minutes} 分钟。"
+    return f"还在处理，已用约 {minutes} 分钟。"
 
 
 def _weixin_inactivity_warning(elapsed_mins: int) -> str:
@@ -17778,20 +17850,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # HERMES_AGENT_NOTIFY_INTERVAL env var.  Default 180s (3 min).
         # 0 = disable notifications.
         _NOTIFY_INTERVAL_RAW = _float_env("HERMES_AGENT_NOTIFY_INTERVAL", 180)
-        _NOTIFY_INTERVAL = _NOTIFY_INTERVAL_RAW if _NOTIFY_INTERVAL_RAW > 0 else None
-        if not bool(
-            resolve_display_setting(
+        _FIRST_NOTICE_DELAY, _HEARTBEAT_INTERVAL, _presentation_policy = (
+            _long_running_notification_schedule(
                 user_config,
-                platform_key,
-                "long_running_notifications",
-                True,
+                source.platform,
+                _NOTIFY_INTERVAL_RAW,
             )
-        ):
-            _NOTIFY_INTERVAL = None
+        )
         _notify_start = time.time()
 
         async def _notify_long_running():
-            if _NOTIFY_INTERVAL is None:
+            if _FIRST_NOTICE_DELAY is None or _HEARTBEAT_INTERVAL is None:
                 return  # Notifications disabled (gateway_notify_interval: 0)
             _notify_adapter = self.adapters.get(source.platform)
             if not _notify_adapter:
@@ -17802,8 +17871,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # interval. Falls back to send-new when edit fails or isn't
             # supported by the adapter.
             _heartbeat_msg_id: Optional[str] = None
+            _is_first_notice = True
             while True:
-                await asyncio.sleep(_NOTIFY_INTERVAL)
+                await asyncio.sleep(_FIRST_NOTICE_DELAY if _is_first_notice else _HEARTBEAT_INTERVAL)
                 # Stop heartbeating once this run no longer owns the session
                 # slot or the executor has finished — otherwise a stale
                 # "running: delegate_task" bubble can outlive the run that
@@ -17818,6 +17888,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     session_key, agent_holder[0], _exec_ref
                 ):
                     break
+                _elapsed_seconds = time.time() - _notify_start
                 _elapsed_mins = int((time.time() - _notify_start) // 60)
                 # Include agent activity context if available. Default
                 # heartbeat is terse: elapsed + current tool. Verbose
@@ -17833,6 +17904,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         True,
                     )
                 )
+                _activity_label = None
                 if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
                     try:
                         _a = _agent_ref.get_activity_summary()
@@ -17842,16 +17914,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 f"iteration {_a['api_call_count']}/{_a['max_iterations']}"
                             )
                         _action = _a.get("current_tool") or _a.get("last_activity_desc")
+                        _activity_label = _action
                         if _action:
                             _parts.append(str(_action))
                         if _parts:
                             _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
-                if source.platform == Platform.WEIXIN:
+                if _presentation_policy.progress_notice_style == "summary":
+                    _heartbeat_text = _public_progress_notice(
+                        elapsed_seconds=_elapsed_seconds,
+                        activity=_activity_label,
+                        first=_is_first_notice,
+                    )
+                elif source.platform == Platform.WEIXIN:
                     _heartbeat_text = _weixin_long_running_notice(_elapsed_mins)
                 else:
                     _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                _is_first_notice = False
                 try:
                     _notify_res = None
                     if _heartbeat_msg_id:

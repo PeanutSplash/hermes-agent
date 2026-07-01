@@ -4,7 +4,10 @@ import pytest
 
 from gateway.config import Platform
 from gateway.run import (
+    _long_running_notification_schedule,
     _prepare_gateway_status_message,
+    _public_progress_notice,
+    _public_progress_stage_label,
     _sanitize_gateway_final_response,
     _weixin_inactivity_timeout_reply,
     _weixin_inactivity_warning,
@@ -195,6 +198,15 @@ def test_weixin_final_response_sanitizes_provider_errors_in_chinese():
 
 def test_weixin_runtime_notices_are_public_friendly_chinese():
     assert _weixin_long_running_notice(3) == "⏳ 我还在处理，已用约 3 分钟。"
+    assert _public_progress_notice(elapsed_seconds=30, first=True) == "收到，我正在处理，可能需要一会儿。"
+    assert _public_progress_notice(elapsed_seconds=95) == "还在处理，已用约 1 分钟。"
+    assert (
+        _public_progress_notice(elapsed_seconds=125, activity="terminal")
+        == "还在处理，当前在准备或执行操作，已用约 2 分钟。"
+    )
+    assert _public_progress_stage_label("web_search") == "查找资料"
+    assert _public_progress_stage_label("read_file") == "读取和整理数据"
+    assert _public_progress_stage_label("pytest") == "验证结果"
     warning = _weixin_inactivity_warning(15)
     timeout = _weixin_inactivity_timeout_reply()
 
@@ -205,6 +217,42 @@ def test_weixin_runtime_notices_are_public_friendly_chinese():
     assert "/new" in timeout
     assert "agent" not in warning.lower()
     assert "gateway_timeout" not in timeout
+
+
+def test_public_presentation_schedule_enables_weixin_reassurance_by_default():
+    first_delay, heartbeat, policy = _long_running_notification_schedule({}, Platform.WEIXIN, 180)
+
+    assert policy.progress_notice_style == "summary"
+    assert first_delay == 30.0
+    assert heartbeat == 90.0
+
+
+def test_public_presentation_schedule_respects_explicit_disable():
+    cfg = {"display": {"platforms": {"weixin": {"long_running_notifications": False}}}}
+
+    first_delay, heartbeat, policy = _long_running_notification_schedule(cfg, Platform.WEIXIN, 180)
+
+    assert policy.progress_notice_style == "summary"
+    assert first_delay is None
+    assert heartbeat is None
+
+
+def test_public_presentation_schedule_can_be_tuned():
+    cfg = {
+        "display": {
+            "platforms": {
+                "weixin": {
+                    "long_task_notice_delay_seconds": 45,
+                    "long_task_heartbeat_seconds": 120,
+                }
+            }
+        }
+    }
+
+    first_delay, heartbeat, _policy = _long_running_notification_schedule(cfg, Platform.WEIXIN, 180)
+
+    assert first_delay == 45.0
+    assert heartbeat == 120.0
 
 
 def test_telegram_final_response_redacts_auth_secrets():

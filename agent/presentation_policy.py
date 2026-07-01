@@ -34,6 +34,9 @@ class PresentationPolicy:
     show_debug_errors: bool = True
     suppress_plain_text_busy_ack: bool = False
     approval_prompt_style: str = "technical"
+    progress_notice_style: str = "technical"
+    long_task_notice_delay_seconds: int | None = None
+    long_task_heartbeat_seconds: int | None = None
 
     @property
     def is_public(self) -> bool:
@@ -53,6 +56,9 @@ _PUBLIC_DEFAULTS = PresentationPolicy(
     show_debug_errors=False,
     suppress_plain_text_busy_ack=True,
     approval_prompt_style="summary",
+    progress_notice_style="summary",
+    long_task_notice_delay_seconds=30,
+    long_task_heartbeat_seconds=90,
 )
 
 _PLATFORM_AUDIENCE_DEFAULTS = {
@@ -84,6 +90,16 @@ def _normalise_bool(value: Any, default: bool) -> bool:
 def _normalise_approval_style(value: Any, default: str) -> str:
     val = str(value or "").strip().lower()
     return val if val in {"technical", "summary"} else default
+
+
+def _normalise_positive_int(value: Any, default: int | None) -> int | None:
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else None
 
 
 def _display_value(user_config: dict, platform: str, key: str) -> Any:
@@ -134,5 +150,17 @@ def resolve_presentation_policy(user_config: dict | None = None, platform: Any =
             policy,
             approval_prompt_style=_normalise_approval_style(approval_style, policy.approval_prompt_style),
         )
+
+    progress_style = _display_value(cfg, plat, "progress_notice_style")
+    if progress_style is not None:
+        policy = replace(
+            policy,
+            progress_notice_style=_normalise_approval_style(progress_style, policy.progress_notice_style),
+        )
+
+    for field_name in ("long_task_notice_delay_seconds", "long_task_heartbeat_seconds"):
+        val = _display_value(cfg, plat, field_name)
+        if val is not None:
+            policy = replace(policy, **{field_name: _normalise_positive_int(val, getattr(policy, field_name))})
 
     return policy

@@ -1061,6 +1061,8 @@ display:
   #         audience: public      # public | developer
   #         show_internal_paths: false
   #         approval_prompt_style: summary
+  #         long_task_notice_delay_seconds: 30
+  #         long_task_heartbeat_seconds: 90
 
   # Gateway-only natural mid-turn assistant updates.
   # When true, completed assistant status messages are sent as separate chat

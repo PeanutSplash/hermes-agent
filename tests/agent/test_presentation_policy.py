@@ -20,6 +20,9 @@ def test_weixin_defaults_to_public_consumer_policy():
     assert policy.show_debug_errors is False
     assert policy.suppress_plain_text_busy_ack is True
     assert policy.approval_prompt_style == "summary"
+    assert policy.progress_notice_style == "summary"
+    assert policy.long_task_notice_delay_seconds == 30
+    assert policy.long_task_heartbeat_seconds == 90
 
 
 def test_unknown_platform_defaults_to_developer_policy():
@@ -33,6 +36,9 @@ def test_unknown_platform_defaults_to_developer_policy():
     assert policy.show_internal_paths is True
     assert policy.suppress_plain_text_busy_ack is False
     assert policy.approval_prompt_style == "technical"
+    assert policy.progress_notice_style == "technical"
+    assert policy.long_task_notice_delay_seconds is None
+    assert policy.long_task_heartbeat_seconds is None
 
 
 def test_platform_audience_override_can_restore_developer_detail():
@@ -53,6 +59,9 @@ def test_platform_audience_override_can_restore_developer_detail():
     assert policy.show_internal_paths is True
     assert policy.suppress_plain_text_busy_ack is False
     assert policy.approval_prompt_style == "technical"
+    assert policy.progress_notice_style == "technical"
+    assert policy.long_task_notice_delay_seconds is None
+    assert policy.long_task_heartbeat_seconds is None
 
 
 def test_public_policy_fields_can_be_overridden():
@@ -64,6 +73,9 @@ def test_public_policy_fields_can_be_overridden():
                     "show_internal_paths": True,
                     "suppress_plain_text_busy_ack": False,
                     "approval_prompt_style": "technical",
+                    "progress_notice_style": "technical",
+                    "long_task_notice_delay_seconds": 45,
+                    "long_task_heartbeat_seconds": 120,
                 }
             }
         }
@@ -76,6 +88,9 @@ def test_public_policy_fields_can_be_overridden():
     assert policy.show_internal_paths is True
     assert policy.suppress_plain_text_busy_ack is False
     assert policy.approval_prompt_style == "technical"
+    assert policy.progress_notice_style == "technical"
+    assert policy.long_task_notice_delay_seconds == 45
+    assert policy.long_task_heartbeat_seconds == 120
 
 
 def test_public_prompt_guidance_is_result_first_and_hides_process():

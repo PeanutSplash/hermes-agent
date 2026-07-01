@@ -1775,6 +1775,9 @@ DEFAULT_CONFIG = {
         #   display.platforms.weixin.audience: public | developer
         # Public audience mode is result-first and hides process/tool/path
         # details by default; developer mode keeps technical detail visible.
+        # Public mode also supports fixed long-task reassurance notices:
+        #   long_task_notice_delay_seconds (default 30 for Weixin public)
+        #   long_task_heartbeat_seconds (default 90 for Weixin public)
         # Weixin defaults to public even when no config key is present.
         #
         # Shipped defaults encode the streaming experience that works best
