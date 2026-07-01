@@ -451,6 +451,17 @@ def _public_progress_notice(*, elapsed_seconds: float, activity: Any = None, fir
     return f"还在处理，已用约 {minutes} 分钟。"
 
 
+def _activity_waits_for_user_response(activity: Any) -> bool:
+    text = str(activity or "").strip().lower()
+    if not text:
+        return False
+    return (
+        "waiting for user clarify response" in text
+        or "waiting for user approval" in text
+        or "waiting for user response" in text
+    )
+
+
 def _weixin_inactivity_warning(elapsed_mins: int) -> str:
     minutes = max(1, int(elapsed_mins or 0))
     return (
@@ -18172,6 +18183,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
+                if _activity_waits_for_user_response(_activity_label):
+                    _is_first_notice = False
+                    continue
                 if _presentation_policy.progress_notice_style == "summary":
                     _heartbeat_text = _public_progress_notice(
                         elapsed_seconds=_elapsed_seconds,

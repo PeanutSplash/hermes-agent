@@ -8,6 +8,7 @@ from gateway.run import (
     _destructive_slash_opt_out_note,
     _destructive_slash_prompt_message,
     _active_session_limit_reply,
+    _activity_waits_for_user_response,
     _gateway_pairing_code_reply,
     _gateway_pairing_rate_limited_reply,
     _gateway_unexpected_error_reply,
@@ -247,6 +248,13 @@ def test_weixin_runtime_notices_are_public_friendly_chinese():
     assert "/new" in timeout
     assert "agent" not in warning.lower()
     assert "gateway_timeout" not in timeout
+
+
+def test_user_wait_activity_suppresses_long_running_heartbeat():
+    assert _activity_waits_for_user_response("waiting for user clarify response") is True
+    assert _activity_waits_for_user_response("waiting for user approval") is True
+    assert _activity_waits_for_user_response("terminal: npm install") is False
+    assert _activity_waits_for_user_response("") is False
 
 
 def test_weixin_gateway_control_prompts_are_public_friendly_chinese():
