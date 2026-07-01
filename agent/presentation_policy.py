@@ -57,8 +57,8 @@ _PUBLIC_DEFAULTS = PresentationPolicy(
     suppress_plain_text_busy_ack=True,
     approval_prompt_style="summary",
     progress_notice_style="summary",
-    long_task_notice_delay_seconds=30,
-    long_task_heartbeat_seconds=90,
+    long_task_notice_delay_seconds=60,
+    long_task_heartbeat_seconds=300,
 )
 
 _PLATFORM_AUDIENCE_DEFAULTS = {

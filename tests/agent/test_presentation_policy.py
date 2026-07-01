@@ -21,8 +21,8 @@ def test_weixin_defaults_to_public_consumer_policy():
     assert policy.suppress_plain_text_busy_ack is True
     assert policy.approval_prompt_style == "summary"
     assert policy.progress_notice_style == "summary"
-    assert policy.long_task_notice_delay_seconds == 30
-    assert policy.long_task_heartbeat_seconds == 90
+    assert policy.long_task_notice_delay_seconds == 60
+    assert policy.long_task_heartbeat_seconds == 300
 
 
 def test_unknown_platform_defaults_to_developer_policy():

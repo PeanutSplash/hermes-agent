@@ -347,8 +347,8 @@ def test_public_presentation_schedule_enables_weixin_reassurance_by_default():
     first_delay, heartbeat, policy = _long_running_notification_schedule({}, Platform.WEIXIN, 180)
 
     assert policy.progress_notice_style == "summary"
-    assert first_delay == 30.0
-    assert heartbeat == 90.0
+    assert first_delay == 60.0
+    assert heartbeat == 300.0
 
 
 def test_public_presentation_schedule_respects_explicit_disable():
