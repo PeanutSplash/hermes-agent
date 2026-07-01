@@ -1121,6 +1121,22 @@ class TestPromptBuilderConstants:
         assert "MEDIA:" in hint
         assert "Markdown" in hint
 
+    def test_platform_hints_weixin_safe_markdown_subset(self):
+        hint = PLATFORM_HINTS["weixin"]
+        lowered = hint.lower()
+        assert "weixin" in lowered or "wechat" in lowered
+        assert "safe markdown" in lowered
+        assert "**bold**" in hint
+        assert "fenced code" in lowered
+        assert "[text](url)" in hint
+        assert "avoid italic" in lowered
+        assert "strikethrough" in lowered
+        assert "task-list" in lowered
+        assert "bare urls" in lowered
+        assert "complex tables" in lowered
+        assert "markdown image syntax" in lowered
+        assert "include MEDIA:" in hint
+
     def test_platform_hints_webui(self):
         hint = PLATFORM_HINTS["webui"]
         assert "WebUI" in hint
@@ -1644,5 +1660,4 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 

@@ -151,6 +151,12 @@ _HEADER_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _TABLE_RULE_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
 _FENCE_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_TASK_LIST_RE = re.compile(r"^(\s*[-*+]\s+)\[[ xX]\]\s+")
+_STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
+_ITALIC_RE = re.compile(r"(?<![\w*])\*([^\s*\n](?:[^*\n]*?[^\s*\n])?)\*(?![\w*])")
+_HTML_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9:-]*(?:\s+[^<>]*)?>")
+_BARE_URL_RE = re.compile(r"(?<!\]\()(?<!<)(https?://[^\s<>()\]]+[^\s<>\].,;:!?])")
 
 
 def check_weixin_requirements() -> bool:
@@ -666,6 +672,46 @@ def _split_table_row(line: str) -> List[str]:
     return [cell.strip() for cell in row.split("|")]
 
 
+def _apply_outside_inline_code(line: str, transform) -> str:
+    """Apply a text transform without touching simple inline-code spans."""
+    if "`" not in line:
+        return transform(line)
+
+    result: List[str] = []
+    pos = 0
+    for match in _INLINE_CODE_RE.finditer(line):
+        if match.start() > pos:
+            result.append(transform(line[pos:match.start()]))
+        result.append(match.group(0))
+        pos = match.end()
+    if pos < len(line):
+        result.append(transform(line[pos:]))
+    return "".join(result)
+
+
+def _linkify_weixin_bare_urls(segment: str) -> str:
+    """Convert bare URLs to explicit Markdown links for Weixin rendering."""
+
+    def repl(match: re.Match[str]) -> str:
+        url = match.group(1)
+        return f"[{url}]({url})"
+
+    return _BARE_URL_RE.sub(repl, segment)
+
+
+def _sanitize_weixin_markdown_subset_line(line: str) -> str:
+    """Downgrade unsupported Weixin Markdown outside code spans."""
+
+    def transform(segment: str) -> str:
+        segment = _TASK_LIST_RE.sub(r"\1", segment)
+        segment = _STRIKE_RE.sub(r"\1", segment)
+        segment = _ITALIC_RE.sub(r"\1", segment)
+        segment = _HTML_TAG_RE.sub("", segment)
+        return _linkify_weixin_bare_urls(segment)
+
+    return _apply_outside_inline_code(line, transform)
+
+
 def _normalize_markdown_blocks(content: str) -> str:
     lines = content.splitlines()
     result: List[str] = []
@@ -683,6 +729,8 @@ def _normalize_markdown_blocks(content: str) -> str:
         if in_code_block:
             result.append(line)
             continue
+
+        line = _sanitize_weixin_markdown_subset_line(line)
 
         if not line.strip():
             blank_run += 1

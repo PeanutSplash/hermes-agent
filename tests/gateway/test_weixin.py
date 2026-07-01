@@ -54,6 +54,40 @@ class TestWeixinFormatting:
 
         assert adapter.format_message(content) == content
 
+    def test_format_message_downgrades_unsupported_markdown_subset(self):
+        adapter = _make_adapter()
+
+        content = (
+            "- [x] 已完成\n"
+            "- [ ] 待办\n"
+            "Use *italic* and ~~deleted~~ and <b>HTML</b>.\n"
+            "Visit https://example.com/docs."
+        )
+
+        assert adapter.format_message(content) == (
+            "- 已完成\n"
+            "- 待办\n"
+            "Use italic and deleted and HTML.\n"
+            "Visit [https://example.com/docs](https://example.com/docs)."
+        )
+
+    def test_format_message_preserves_links_and_code_during_subset_cleanup(self):
+        adapter = _make_adapter()
+
+        content = (
+            "See [docs](https://example.com/docs) and `*literal* https://x.test`.\n"
+            "```html\n<b>keep tags in code</b>\n```"
+        )
+
+        assert adapter.format_message(content) == content
+
+    def test_format_message_does_not_treat_multiplication_as_italic(self):
+        adapter = _make_adapter()
+
+        content = "Use 2*3*4 as the size, not *italic* text."
+
+        assert adapter.format_message(content) == "Use 2*3*4 as the size, not italic text."
+
     def test_format_message_wraps_long_plain_lines_for_copying(self):
         adapter = _make_adapter()
 
