@@ -114,6 +114,52 @@ def _friendly_weixin_status_reply(
     return "\n\n".join(lines)
 
 
+def _friendly_weixin_help_reply(prefix: str = "/") -> str:
+    """Return a short, public-user-friendly Weixin command guide."""
+    p = prefix or "/"
+    return "\n\n".join(
+        [
+            "📖 Hermes 常用命令",
+            "\n".join(
+                [
+                    "对话",
+                    "",
+                    f"- `{p}new`：重新开始一段对话",
+                    f"- `{p}status`：查看现在是否还在处理",
+                    f"- `{p}stop`：停止当前任务",
+                    f"- `{p}retry`：重新回答上一条消息",
+                    f"- `{p}undo`：撤回最近一次对话",
+                ]
+            ),
+            "\n".join(
+                [
+                    "排队和后台",
+                    "",
+                    f"- `{p}queue 你的需求`：等当前任务结束后再处理",
+                    f"- `{p}background 你的需求`：放到后台处理",
+                    f"- `{p}agents`：查看正在处理的任务",
+                ]
+            ),
+            "\n".join(
+                [
+                    "需要确认时",
+                    "",
+                    f"- `{p}approve`：同意继续操作",
+                    f"- `{p}deny`：取消这次操作",
+                ]
+            ),
+            "\n".join(
+                [
+                    "其他",
+                    "",
+                    f"- `{p}voice`：查看或切换语音回复",
+                    f"- `{p}help`：查看这份说明",
+                ]
+            ),
+        ]
+    )
+
+
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
@@ -1075,6 +1121,11 @@ class GatewaySlashCommandsMixin:
         """Handle /help command - list available commands."""
         from gateway.run import _telegramize_command_mentions
         from hermes_cli.commands import gateway_help_lines
+        source = getattr(event, "source", None)
+        if getattr(source, "platform", None) == Platform.WEIXIN:
+            return _friendly_weixin_help_reply(
+                self._typed_command_prefix_for(source.platform)
+            )
         lines = [
             t("gateway.help.header"),
             *gateway_help_lines(),

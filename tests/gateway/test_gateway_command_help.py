@@ -86,3 +86,17 @@ async def test_help_keeps_non_telegram_slash_command_mentions_unchanged(monkeypa
     )
 
     assert "`/Linear`" in result
+
+
+@pytest.mark.asyncio
+async def test_help_uses_public_chinese_short_guide_for_weixin():
+    result = await _make_runner()._handle_help_command(
+        _make_event("/help", Platform.WEIXIN)
+    )
+
+    assert result.startswith("📖 Hermes 常用命令")
+    assert "\n- `/new`：重新开始一段对话\n" in result
+    assert "\n\n排队和后台\n" in result
+    assert "Show available commands" not in result
+    assert "Start a new session" not in result
+    assert " -- " not in result
