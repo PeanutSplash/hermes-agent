@@ -10,9 +10,9 @@ from gateway.platforms.base import MessageEvent
 from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
-def _make_source() -> SessionSource:
+def _make_source(platform: Platform = Platform.TELEGRAM) -> SessionSource:
     return SessionSource(
-        platform=Platform.TELEGRAM,
+        platform=platform,
         user_id="u1",
         chat_id="c1",
         user_name="tester",
@@ -20,20 +20,20 @@ def _make_source() -> SessionSource:
     )
 
 
-def _make_event(text: str) -> MessageEvent:
-    return MessageEvent(text=text, source=_make_source(), message_id="m1")
+def _make_event(text: str, platform: Platform = Platform.TELEGRAM) -> MessageEvent:
+    return MessageEvent(text=text, source=_make_source(platform), message_id="m1")
 
 
-def _make_runner():
+def _make_runner(platform: Platform = Platform.TELEGRAM):
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
-        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")}
+        platforms={platform: PlatformConfig(enabled=True, token="***")}
     )
     adapter = MagicMock()
     adapter.send = AsyncMock()
-    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.adapters = {platform: adapter}
     runner._voice_mode = {}
     runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
     runner._session_model_overrides = {}
@@ -41,13 +41,13 @@ def _make_runner():
     runner._pending_model_notes = {}
     runner._background_tasks = set()
 
-    session_key = build_session_key(_make_source())
+    session_key = build_session_key(_make_source(platform))
     session_entry = SessionEntry(
         session_key=session_key,
         session_id="sess-1",
         created_at=datetime.now(),
         updated_at=datetime.now(),
-        platform=Platform.TELEGRAM,
+        platform=platform,
         chat_type="dm",
     )
     runner.session_store = MagicMock()
@@ -139,3 +139,44 @@ async def test_new_command_only_clears_own_session():
     assert other_key in runner._session_reasoning_overrides
     assert session_key not in runner._pending_model_notes
     assert other_key in runner._pending_model_notes
+
+
+@pytest.mark.asyncio
+async def test_weixin_new_command_returns_public_friendly_chinese_reply():
+    """Weixin /new should not expose developer runtime metadata to end users."""
+    runner = _make_runner(Platform.WEIXIN)
+    runner._format_session_info = lambda: (
+        "◆ Model: `gpt-5.4`\n"
+        "◆ Provider: openai-codex\n"
+        "◆ Context: 1.0M tokens (config)"
+    )
+
+    result = await runner._handle_reset_command(_make_event("/new", Platform.WEIXIN))
+    reply = str(result)
+
+    assert reply.startswith("✨ 已开启新对话")
+    assert "\n\n我已经清空刚才这轮聊天的上下文。\n\n" in reply
+    assert "你可以直接发送新的问题或需求。" in reply
+    assert "Model:" not in reply
+    assert "Provider:" not in reply
+    assert "Context:" not in reply
+    assert "tokens" not in reply
+    assert "提示" not in reply
+    assert "/image" not in reply
+
+
+@pytest.mark.asyncio
+async def test_weixin_new_command_uses_saved_title_in_public_reply():
+    """Weixin title display should come from structured reset state."""
+    runner = _make_runner(Platform.WEIXIN)
+    runner._session_db = AsyncMock()
+
+    result = await runner._handle_reset_command(
+        _make_event("/new 我的旅行计划", Platform.WEIXIN)
+    )
+    reply = str(result)
+
+    runner._session_db.set_session_title.assert_called_once_with("sess-1", "我的旅行计划")
+    assert reply.startswith("✨ 已开启新对话：我的旅行计划")
+    assert "Model:" not in reply
+    assert "Provider:" not in reply

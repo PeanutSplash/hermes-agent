@@ -80,6 +80,22 @@ def _model_switch_skew_guard() -> Optional[str]:
     )
 
 
+def _friendly_weixin_reset_reply(
+    *, title: Optional[str] = None, title_note: str = ""
+) -> str:
+    """Return a public-user-friendly Weixin reset notice."""
+    clean_title = str(title or "").strip()
+    header_text = f"✨ 已开启新对话：{clean_title}" if clean_title else "✨ 已开启新对话"
+    lines = [
+        f"{header_text}\n\n"
+        "我已经清空刚才这轮聊天的上下文。\n\n"
+        "你可以直接发送新的问题或需求。"
+    ]
+    if title_note:
+        lines.append("标题没有保存，但新对话已经开启。")
+    return "\n\n".join(lines)
+
+
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
@@ -237,6 +253,7 @@ class GatewaySlashCommandsMixin:
         # Set session title if provided with /new <title>
         _title_arg = event.get_command_args().strip()
         _title_note = ""
+        _applied_title = None
         if _title_arg and self._session_db and new_entry:
             from hermes_state import SessionDB
             try:
@@ -248,6 +265,7 @@ class GatewaySlashCommandsMixin:
                 try:
                     await self._session_db.set_session_title(new_entry.session_id, sanitized)
                     header = t("gateway.reset.header_titled", title=sanitized)
+                    _applied_title = sanitized
                 except ValueError as e:
                     _title_note = t("gateway.reset.title_error_untitled", error=str(e))
                 except Exception:
@@ -282,6 +300,14 @@ class GatewaySlashCommandsMixin:
             )
         except Exception:
             pass
+
+        if source.platform == Platform.WEIXIN:
+            return EphemeralReply(
+                _friendly_weixin_reset_reply(
+                    title=_applied_title,
+                    title_note=_title_note,
+                )
+            )
 
         # Append a random tip to the reset message
         try:
