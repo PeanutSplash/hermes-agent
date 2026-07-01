@@ -861,46 +861,6 @@ def _split_delivery_units_for_weixin(content: str) -> List[str]:
     return [unit for unit in units if unit]
 
 
-def _looks_like_chatty_line_for_weixin(line: str) -> bool:
-    """Return True when a line looks like a standalone chat utterance."""
-    stripped = line.strip()
-    if not stripped:
-        return False
-    if len(stripped) > 48:
-        return False
-    if line.startswith((" ", "\t")):
-        return False
-    if stripped.startswith((">", "-", "*", "【", "#", "|")):
-        return False
-    if _TABLE_RULE_RE.match(stripped):
-        return False
-    if re.match(r"^\*\*[^*]+\*\*$", stripped):
-        return False
-    if re.match(r"^\d+\.\s", stripped):
-        return False
-    return True
-
-
-def _looks_like_heading_line_for_weixin(line: str) -> bool:
-    """Return True when a short line behaves like a heading."""
-    stripped = line.strip()
-    if not stripped:
-        return False
-    if _HEADER_RE.match(stripped):
-        return True
-    return len(stripped) <= 24 and stripped.endswith((":", "："))
-
-
-def _should_split_short_chat_block_for_weixin(block: str) -> bool:
-    """Split only chat-like multiline blocks into separate bubbles."""
-    lines = [line for line in block.splitlines() if line.strip()]
-    if not 2 <= len(lines) <= 6:
-        return False
-    if _looks_like_heading_line_for_weixin(lines[0]):
-        return False
-    return all(_looks_like_chatty_line_for_weixin(line) for line in lines)
-
-
 def _pack_markdown_blocks_for_weixin(content: str, max_length: int) -> List[str]:
     if len(content) <= max_length:
         return [content]
@@ -956,15 +916,11 @@ def _split_text_for_weixin_delivery(
             chunks.extend(_pack_markdown_blocks_for_weixin(unit, max_length))
         return [c for c in chunks if c] or [content]
 
-    # Compact (default): single message when under the limit — unless the
-    # content looks like a short chatty exchange, in which case split into
-    # separate bubbles for a more natural chat feel.
+    # Compact (default): single message when under the limit. Preserve explicit
+    # newlines inside that one bubble; users asking for line breaks are not
+    # asking for multiple Weixin messages.
     if len(content) <= max_length:
-        return (
-            [u for u in _split_delivery_units_for_weixin(content) if u]
-            if _should_split_short_chat_block_for_weixin(content)
-            else [content]
-        )
+        return [content]
     return _pack_markdown_blocks_for_weixin(content, max_length) or [content]
 
 

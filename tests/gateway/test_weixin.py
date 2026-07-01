@@ -117,13 +117,25 @@ class TestWeixinFormatting:
 
 
 class TestWeixinChunking:
-    def test_split_text_splits_short_chatty_replies_into_separate_bubbles(self):
+    def test_split_text_keeps_short_multiline_replies_in_one_bubble(self):
         adapter = _make_adapter()
 
         content = adapter.format_message("第一行\n第二行\n第三行")
         chunks = adapter._split_text(content)
 
-        assert chunks == ["第一行", "第二行", "第三行"]
+        assert chunks == ["第一行\n第二行\n第三行"]
+
+    def test_split_text_keeps_reset_notice_in_one_bubble(self):
+        adapter = _make_adapter()
+
+        content = adapter.format_message(
+            "✨ 已开启新对话\n\n"
+            "我已经清空刚才这轮聊天的上下文。\n\n"
+            "你可以直接发送新的问题或需求。"
+        )
+        chunks = adapter._split_text(content)
+
+        assert chunks == [content]
 
     def test_split_text_keeps_structured_table_block_together(self):
         adapter = _make_adapter()
