@@ -483,7 +483,28 @@ def _weixin_gateway_draining_reply(action: str, *, queued: bool, new_work: bool 
     return f"⏳ 服务正在{label}，暂时不能处理{noun}。请稍后再试。"
 
 
-def _gateway_shutdown_notice(platform: Any, *, restarting: bool) -> str:
+def _gateway_update_restart_pending() -> bool:
+    try:
+        return any(
+            (_hermes_home / name).exists()
+            for name in (".update_pending.json", ".update_pending.claimed.json")
+        )
+    except Exception:
+        return False
+
+
+def _gateway_shutdown_notice(platform: Any, *, restarting: bool, update: bool = False) -> str:
+    if update:
+        if _is_weixin_platform(platform):
+            return (
+                "⚕ Hermes 正在更新，服务会短暂重启。\n\n"
+                "当前任务会被中断。更新完成后你发任意消息，我会尽量从刚才的位置继续。"
+            )
+        return (
+            "⚕ Hermes update in progress — The gateway is restarting, so your "
+            "current task will be interrupted. Send any message after restart "
+            "and I'll try to resume where you left off."
+        )
     if _is_weixin_platform(platform):
         if restarting:
             return (
@@ -499,6 +520,39 @@ def _gateway_shutdown_notice(platform: Any, *, restarting: bool) -> str:
         else "Your current task will be interrupted."
     )
     return f"⚠️ Gateway {action} — {hint}"
+
+
+def _gateway_update_completion_notice(platform: Any, *, exit_code: int, output: str = "") -> str:
+    clean_output = re.sub(r'\x1b\[[0-9;]*m', '', output or "").strip()
+    if _is_weixin_platform(platform):
+        if exit_code == 0:
+            if "Code did not change; skipping gateway restart" in clean_output:
+                return (
+                    "✅ Hermes 已经是最新版本\n\n"
+                    "代码没有变化，服务没有重启。可以继续使用。"
+                )
+            return "✅ Hermes 更新完成\n\n现在已经是最新版本，可以继续使用。"
+        if exit_code == 124:
+            return (
+                "⏱️ Hermes 更新暂时没有完成\n\n"
+                "这次等待时间太久，我先停止跟踪。你可以稍后再试。"
+            )
+        return (
+            "❌ Hermes 更新失败\n\n"
+            "这次没有更新成功，服务仍会尽量保持可用。你可以稍后再试。"
+        )
+
+    if clean_output:
+        if len(clean_output) > 3500:
+            clean_output = "…" + clean_output[-3500:]
+        if exit_code == 0:
+            return f"✅ Hermes update finished.\n\n```\n{clean_output}\n```"
+        return f"❌ Hermes update failed.\n\n```\n{clean_output}\n```"
+    if exit_code == 0:
+        return "✅ Hermes update finished successfully."
+    if exit_code == 124:
+        return "❌ Hermes update timed out after 30 minutes."
+    return "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
 
 
 def _weixin_queue_usage_reply() -> str:
@@ -5353,6 +5407,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         active = self._snapshot_running_agents()
         restart_source = self._restart_command_source if self._restart_requested else None
+        update_restart = self._restart_requested and _gateway_update_restart_pending()
 
         notified: set[tuple[str, str, Optional[str]]] = set()
         for session_key in active:
@@ -5428,7 +5483,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
 
                 msg = _gateway_shutdown_notice(
-                    platform, restarting=self._restart_requested
+                    platform,
+                    restarting=self._restart_requested,
+                    update=update_restart,
                 )
                 result = await adapter.send(chat_id, msg, metadata=metadata)
                 if result is not None and getattr(result, "success", True) is False:
@@ -5511,7 +5568,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter=adapter,
                 )
                 msg = _gateway_shutdown_notice(
-                    platform, restarting=self._restart_requested
+                    platform,
+                    restarting=self._restart_requested,
+                    update=update_restart,
                 )
                 if metadata:
                     result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
@@ -13753,7 +13812,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 await adapter.send(
                     chat_id,
-                    "❌ Hermes update timed out after 30 minutes.",
+                    _gateway_update_completion_notice(platform, exit_code=124),
                     metadata=_non_conversational_metadata(metadata, platform=platform),
                 )
             except Exception:
@@ -13847,19 +13906,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     reply_to_message_id=message_id,
                     adapter=adapter,
                 )
-                # Strip ANSI escape codes for clean display
-                output = re.sub(r'\x1b\[[0-9;]*m', '', output).strip()
-                if output:
-                    if len(output) > 3500:
-                        output = "…" + output[-3500:]
-                    if exit_code == 0:
-                        msg = f"✅ Hermes update finished.\n\n```\n{output}\n```"
-                    else:
-                        msg = f"❌ Hermes update failed.\n\n```\n{output}\n```"
-                elif exit_code == 0:
-                    msg = "✅ Hermes update finished successfully."
-                else:
-                    msg = "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
+                msg = _gateway_update_completion_notice(
+                    platform,
+                    exit_code=exit_code,
+                    output=output,
+                )
                 await adapter.send(
                     chat_id,
                     msg,

@@ -729,6 +729,82 @@ class TestSendUpdateNotification:
         assert "Traceback: boom" in sent_text
 
     @pytest.mark.asyncio
+    async def test_sends_chinese_success_message_for_weixin(self, tmp_path):
+        runner = _make_runner()
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        pending = {"platform": "weixin", "chat_id": "wxid_1", "user_id": "u1"}
+        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_output.txt").write_text(
+            "→ Found 3 new commit(s)\n✓ Code updated!\n✓ Update complete!"
+        )
+        (hermes_home / ".update_exit_code").write_text("0")
+
+        mock_adapter = AsyncMock()
+        runner.adapters = {Platform.WEIXIN: mock_adapter}
+
+        with patch("gateway.run._hermes_home", hermes_home):
+            result = await runner._send_update_notification()
+
+        assert result is True
+        sent_text = mock_adapter.send.call_args[0][1]
+        assert sent_text == "✅ Hermes 更新完成\n\n现在已经是最新版本，可以继续使用。"
+        assert "Found 3 new commit" not in sent_text
+        assert "Update complete" not in sent_text
+
+    @pytest.mark.asyncio
+    async def test_sends_chinese_no_restart_message_for_weixin_when_code_unchanged(self, tmp_path):
+        runner = _make_runner()
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        pending = {"platform": "weixin", "chat_id": "wxid_1", "user_id": "u1"}
+        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_output.txt").write_text(
+            "→ Code did not change; skipping gateway restart."
+        )
+        (hermes_home / ".update_exit_code").write_text("0")
+
+        mock_adapter = AsyncMock()
+        runner.adapters = {Platform.WEIXIN: mock_adapter}
+
+        with patch("gateway.run._hermes_home", hermes_home):
+            result = await runner._send_update_notification()
+
+        assert result is True
+        sent_text = mock_adapter.send.call_args[0][1]
+        assert sent_text == (
+            "✅ Hermes 已经是最新版本\n\n"
+            "代码没有变化，服务没有重启。可以继续使用。"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sends_chinese_failure_message_for_weixin_without_traceback(self, tmp_path):
+        runner = _make_runner()
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        pending = {"platform": "weixin", "chat_id": "wxid_1", "user_id": "u1"}
+        (hermes_home / ".update_pending.json").write_text(json.dumps(pending))
+        (hermes_home / ".update_output.txt").write_text("Traceback: boom")
+        (hermes_home / ".update_exit_code").write_text("1")
+
+        mock_adapter = AsyncMock()
+        runner.adapters = {Platform.WEIXIN: mock_adapter}
+
+        with patch("gateway.run._hermes_home", hermes_home):
+            result = await runner._send_update_notification()
+
+        assert result is True
+        sent_text = mock_adapter.send.call_args[0][1]
+        assert sent_text == (
+            "❌ Hermes 更新失败\n\n"
+            "这次没有更新成功，服务仍会尽量保持可用。你可以稍后再试。"
+        )
+        assert "Traceback" not in sent_text
+
+    @pytest.mark.asyncio
     async def test_sends_generic_message_when_no_output(self, tmp_path):
         """Sends a success message even if the output file is missing."""
         runner = _make_runner()

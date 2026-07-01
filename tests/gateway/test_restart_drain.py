@@ -1,4 +1,5 @@
 import asyncio
+import json
 import shutil
 import subprocess
 from datetime import datetime
@@ -491,6 +492,57 @@ async def test_restart_notification_is_chinese_for_weixin_active_session():
         "⚠️ 服务正在重启，当前任务会被中断。\n\n"
         "重启后你发任意消息，我会尽量从刚才的位置继续。"
     ]
+
+
+@pytest.mark.asyncio
+async def test_update_restart_notification_is_distinct_for_weixin_active_session(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / ".update_pending.json").write_text(
+        json.dumps({"platform": "weixin", "chat_id": "wxid_1"})
+    )
+
+    runner, adapter = make_restart_runner()
+    runner._restart_requested = True
+    source = SessionSource(
+        platform=Platform.WEIXIN,
+        chat_id="wxid_1",
+        chat_type="dm",
+        user_id="u1",
+    )
+    session_key = build_session_key(source)
+    runner._running_agents[session_key] = MagicMock()
+    runner._cache_session_source(session_key, source)
+    runner.adapters[Platform.WEIXIN] = adapter
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert adapter.sent == [
+        "⚕ Hermes 正在更新，服务会短暂重启。\n\n"
+        "当前任务会被中断。更新完成后你发任意消息，我会尽量从刚才的位置继续。"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_restart_notification_is_distinct_for_telegram(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    (tmp_path / ".update_pending.json").write_text(
+        json.dumps({"platform": "telegram", "chat_id": "999"})
+    )
+
+    runner, adapter = make_restart_runner()
+    runner._restart_requested = True
+    session_key = "agent:main:telegram:dm:999"
+    runner._running_agents[session_key] = MagicMock()
+
+    await runner._notify_active_sessions_of_shutdown()
+
+    assert len(adapter.sent) == 1
+    assert "Hermes update in progress" in adapter.sent[0]
+    assert "Gateway restarting" not in adapter.sent[0]
 
 
 @pytest.mark.asyncio
