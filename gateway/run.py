@@ -55,6 +55,7 @@ from typing import Callable, Dict, Optional, Any, List, Union
 from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.async_utils import safe_schedule_threadsafe
 from agent.i18n import t
+from agent.presentation_policy import PresentationPolicy, resolve_presentation_policy
 from hermes_cli.config import cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
 
@@ -354,6 +355,14 @@ def _is_weixin_platform(platform: Any) -> bool:
     return _gateway_platform_value(platform) == "weixin"
 
 
+def _presentation_policy_for_platform(platform: Any) -> PresentationPolicy:
+    try:
+        cfg = _load_gateway_config()
+    except Exception:
+        cfg = {}
+    return resolve_presentation_policy(cfg, platform)
+
+
 def _weixin_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a public-friendly Weixin reply."""
     if _GATEWAY_AUTH_ERROR_RE.search(text):
@@ -438,8 +447,9 @@ def _weixin_busy_ack_reply(*, is_steer_mode: bool, is_queue_mode: bool, demoted_
     return "收到，我会先停止当前任务，然后处理你的新消息。"
 
 
-def _should_suppress_weixin_busy_ack(event: Any) -> bool:
-    if not _is_weixin_platform(event.source.platform):
+def _should_suppress_plain_text_busy_ack(event: Any) -> bool:
+    policy = _presentation_policy_for_platform(event.source.platform)
+    if not policy.suppress_plain_text_busy_ack:
         return False
     message_type = getattr(event, "message_type", None)
     if str(getattr(message_type, "value", message_type) or "").lower() != "text":
@@ -5058,8 +5068,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not busy_ack_enabled:
             logger.debug("Busy ack suppressed for session %s", session_key)
             return True  # input still processed, just no ack sent
-        if _should_suppress_weixin_busy_ack(event):
-            logger.debug("Weixin busy ack suppressed for plain text follow-up in session %s", session_key)
+        if _should_suppress_plain_text_busy_ack(event):
+            logger.debug("Busy ack suppressed for plain text follow-up in session %s", session_key)
             return True
 
         # Debounce: only send an acknowledgment once every 30 seconds per session
@@ -17198,7 +17208,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Slack threads and reserved by Matrix clients.
                 _p = getattr(_status_adapter, "typed_command_prefix", "/")
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
-                if _is_weixin_platform(source.platform):
+                _presentation_policy = _presentation_policy_for_platform(source.platform)
+                if _presentation_policy.approval_prompt_style == "summary":
                     msg = _weixin_gateway_approval_prompt(cmd, desc, _p)
                 else:
                     msg = (

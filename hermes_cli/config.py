@@ -1771,6 +1771,12 @@ DEFAULT_CONFIG = {
         # display settings that override the global value for that platform
         # only. A setting left unset here falls through to the global default.
         #
+        # Presentation policy can also be set here with:
+        #   display.platforms.weixin.audience: public | developer
+        # Public audience mode is result-first and hides process/tool/path
+        # details by default; developer mode keeps technical detail visible.
+        # Weixin defaults to public even when no config key is present.
+        #
         # Shipped defaults encode the streaming experience that works best
         # per platform:
         #   - Telegram has native animated draft streaming (sendMessageDraft),

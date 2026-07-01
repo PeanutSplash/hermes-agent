@@ -16,6 +16,7 @@ from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
 from typing import Optional
 
 from agent.runtime_cwd import resolve_agent_cwd
+from agent.presentation_policy import PUBLIC_AUDIENCE_PROMPT_GUIDANCE
 from agent.skill_utils import (
     extract_skill_conditions,
     extract_skill_description,
@@ -785,11 +786,7 @@ PLATFORM_HINTS = {
         "You are on Weixin/WeChat. Its Markdown renderer supports only a practical subset, "
         "so keep formatting compact and conservative. Default to clear Simplified Chinese "
         "unless the user uses another language, and avoid developer jargon in public-facing "
-        "answers. Optimize for ordinary consumers: lead with the result the user asked for, "
-        "then add only the few details needed to understand it. Do not narrate your process, "
-        "scripts, file paths, tools, commands, logs, or where you looked unless the user asks "
-        "for debugging/provenance or those details materially affect the answer. For lookups, "
-        "say what you found and the relevant value/time first; put optional caveats at the end. "
+        f"answers. {PUBLIC_AUDIENCE_PROMPT_GUIDANCE} "
         "Safe Markdown: # headings as section labels (do not rely on visual heading "
         "levels), **bold**, `inline code`, fenced code blocks with language tags, bullet/"
         "numbered lists including nesting, plain-text blockquotes, --- separators, and "

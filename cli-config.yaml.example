@@ -1050,6 +1050,18 @@ display:
   #         cleanup_progress: true
   cleanup_progress: false
 
+  # Presentation policy controls how much process/detail the gateway shows.
+  # Set per platform so public chat channels can be result-first while CLI or
+  # developer channels stay technical. Weixin defaults to public even when this
+  # key is omitted.
+  # Example:
+  #   display:
+  #     platforms:
+  #       weixin:
+  #         audience: public      # public | developer
+  #         show_internal_paths: false
+  #         approval_prompt_style: summary
+
   # Gateway-only natural mid-turn assistant updates.
   # When true, completed assistant status messages are sent as separate chat
   # messages. This is independent of tool_progress and gateway streaming.
