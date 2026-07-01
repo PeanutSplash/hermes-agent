@@ -8,16 +8,23 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: sync-upstream-main
   cancel-in-progress: false
+
+env:
+  SYNC_BRANCH: sync/upstream-main
+  CONFLICT_LABEL: upstream-sync-conflict
 
 jobs:
   sync:
     name: Merge upstream/main into fork main
     if: github.repository != 'NousResearch/hermes-agent'
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout fork main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -25,8 +32,23 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Merge upstream
-        id: merge
+      - name: Skip if an unresolved conflict PR is open
+        id: guard
+        run: |
+          set -euo pipefail
+
+          existing="$(gh pr list --state open --label "$CONFLICT_LABEL" \
+            --json number --jq '.[0].number // empty')"
+
+          if [ -n "$existing" ]; then
+            echo "::notice::存在未解决的冲突同步 PR #$existing,本次跳过。请先解决并合并它,自动同步会随后恢复。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream (or open a conflict PR)
+        if: steps.guard.outputs.skip == 'false'
         run: |
           set -euo pipefail
 
@@ -38,21 +60,52 @@ jobs:
 
           before="$(git rev-parse HEAD)"
 
-          if ! git merge --no-edit upstream/main; then
-            echo "::error::upstream/main could not be merged automatically. Resolve the conflict locally, push main, then rerun this workflow."
-            git status --short
-            exit 1
+          # Happy path: clean fast-forward / auto-merge, push straight to main.
+          if git merge --no-edit upstream/main; then
+            after="$(git rev-parse HEAD)"
+            if [ "$before" = "$after" ]; then
+              echo "Fork main 已与 upstream/main 保持一致。"
+            else
+              git push origin HEAD:main
+              echo "已自动合并 upstream/main 并推送到 fork main。"
+            fi
+            exit 0
           fi
 
-          after="$(git rev-parse HEAD)"
-          if [ "$before" = "$after" ]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Fork main is already up to date with upstream/main."
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "Merged upstream/main into fork main."
-          fi
+          # Conflict path: abandon the merge and hand it to a human via a PR.
+          echo "::warning::upstream/main 无法自动合并,改为创建冲突同步 PR。"
+          git merge --abort
 
-      - name: Push merged main
-        if: steps.merge.outputs.changed == 'true'
-        run: git push origin HEAD:main
+          owner="${{ github.repository_owner }}"
+
+          # A stable branch pointing at upstream/main; the PR against main will
+          # surface the conflicts for manual resolution on GitHub or locally.
+          git branch -f "$SYNC_BRANCH" upstream/main
+          git push -f origin "$SYNC_BRANCH"
+
+          # Ensure the label exists so both PR creation and the guard can rely on it.
+          gh label create "$CONFLICT_LABEL" \
+            --color B60205 \
+            --description "upstream 同步存在冲突,需人工解决" 2>/dev/null || true
+
+          body="$(printf '%s\n' \
+            "@$owner \`upstream/main\` 与 fork \`main\` 存在冲突,无法自动合并。" \
+            "" \
+            "请在本 PR 中解决冲突:" \
+            "- GitHub 网页点 **Resolve conflicts**,或" \
+            "- 本地 \`git checkout $SYNC_BRANCH\`,解决冲突后推送。" \
+            "" \
+            "合并本 PR 后,\`Sync Upstream\` 会在下次定时运行时恢复自动同步。" \
+            "在本 PR 合并或关闭之前,该工作流会自动跳过,避免反复产生必定冲突的运行。")"
+
+          pr_url="$(gh pr create \
+            --base main \
+            --head "$SYNC_BRANCH" \
+            --title "chore: sync upstream/main (存在冲突,需人工解决)" \
+            --body "$body" \
+            --label "$CONFLICT_LABEL")"
+
+          echo "已创建冲突同步 PR: $pr_url"
+
+          # Assignee is best-effort (fails harmlessly if owner is an org).
+          gh pr edit "$pr_url" --add-assignee "$owner" || true
