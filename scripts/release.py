@@ -45,6 +45,7 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
+    "b1300658700@outlook.com": "PeanutSplash",  # CI repair for upstream-sync conflict resolution
     "agent@agents-Mac-mini.local": "teknium1",  # upstream commit 80b58ec was committed by @teknium1 under an unlinked local agent identity
     "geoffreybutler94@gmail.com": "geoffreybutler94",  # upstream merge contributor
     "gigakun@agentmail.to": "gigakun3030",  # upstream merge contributor
