@@ -17,9 +17,6 @@ concurrency:
 env:
   SYNC_BRANCH: sync/upstream-main
   CONFLICT_LABEL: upstream-sync-conflict
-  # A classic PAT with `repo` and `workflow` scopes. GitHub's GITHUB_TOKEN
-  # cannot push commits which add or update workflow files.
-  UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
 jobs:
   sync:
@@ -27,14 +24,13 @@ jobs:
     if: github.repository != 'NousResearch/hermes-agent'
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout fork main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
       - name: Skip if an unresolved conflict PR is open
         id: guard
@@ -62,26 +58,21 @@ jobs:
           git remote add upstream https://github.com/NousResearch/hermes-agent.git
           git fetch upstream main
 
-          # The default GITHUB_TOKEN is intentionally prevented from changing
-          # workflow files. Avoid a noisy, permanently failing run when
-          # upstream has changed one; a maintainer can add the documented PAT
-          # secret and re-run this workflow to continue the sync.
-          workflow_changes="$(git diff --name-only "$(git merge-base HEAD upstream/main)" upstream/main -- .github/workflows)"
-          if [ -z "$UPSTREAM_SYNC_TOKEN" ] && [ -n "$workflow_changes" ]; then
-            echo "::warning::upstream/main includes workflow changes. Add repository secret UPSTREAM_SYNC_TOKEN (a PAT with repo + workflow scopes), then re-run this workflow."
-            exit 0
-          fi
-
           before="$(git rev-parse HEAD)"
 
-          # Happy path: clean fast-forward / auto-merge, push straight to main.
-          if git merge --no-edit upstream/main; then
-            after="$(git rev-parse HEAD)"
-            if [ "$before" = "$after" ]; then
-              echo "Fork main 已与 upstream/main 保持一致。"
+          # This fork owns its CI. Sync upstream code, but retain every local
+          # workflow file so upstream Actions changes cannot alter this fork's
+          # checks or require a workflow-scoped credential.
+          if git merge --no-commit --no-ff upstream/main; then
+            git restore --source="$before" --staged --worktree .github/workflows
+
+            if git diff --cached --quiet; then
+              git merge --abort 2>/dev/null || true
+              echo "upstream/main 没有需要同步的非工作流变更。"
             else
+              git commit --no-edit
               git push origin HEAD:main
-              echo "已自动合并 upstream/main 并推送到 fork main。"
+              echo "已自动合并 upstream/main 的非工作流变更并推送到 fork main。"
             fi
             exit 0
           fi
@@ -92,9 +83,15 @@ jobs:
 
           owner="${{ github.repository_owner }}"
 
-          # A stable branch pointing at upstream/main; the PR against main will
-          # surface the conflicts for manual resolution on GitHub or locally.
-          git branch -f "$SYNC_BRANCH" upstream/main
+          # A stable branch based on upstream/main, but with this fork's
+          # workflows restored. The PR surfaces code conflicts without syncing
+          # or requiring permissions for upstream CI changes.
+          git switch -C "$SYNC_BRANCH" upstream/main
+          git restore --source="$before" --staged --worktree .github/workflows
+          git add .github/workflows
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: preserve fork workflows during upstream sync"
+          fi
           git push -f origin "$SYNC_BRANCH"
 
           # Ensure the label exists so both PR creation and the guard can rely on it.

@@ -178,9 +178,6 @@ jobs:
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
-        env:
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
           args=()
@@ -188,8 +185,9 @@ jobs:
             args+=("${IMAGE_NAME}@sha256:${digest_file}")
           done
           if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
             docker buildx imagetools create \
-              -t "${IMAGE_NAME}:${RELEASE_TAG}" \
+              -t "${IMAGE_NAME}:${TAG}" \
               "${args[@]}"
           else
             docker buildx imagetools create \
@@ -197,14 +195,15 @@ jobs:
               -t "${IMAGE_NAME}:latest" \
               "${args[@]}"
           fi
-
-      - name: Inspect image
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+      - name: Inspect image
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
-            docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_TAG}"
+            docker buildx imagetools inspect "${IMAGE_NAME}:${{ github.event.release.tag_name }}"
           else
             docker buildx imagetools inspect "${IMAGE_NAME}:main"
           fi
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
