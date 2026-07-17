@@ -17,6 +17,9 @@ concurrency:
 env:
   SYNC_BRANCH: sync/upstream-main
   CONFLICT_LABEL: upstream-sync-conflict
+  # A classic PAT with `repo` and `workflow` scopes. GitHub's GITHUB_TOKEN
+  # cannot push commits which add or update workflow files.
+  UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
 jobs:
   sync:
@@ -24,13 +27,14 @@ jobs:
     if: github.repository != 'NousResearch/hermes-agent'
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
     steps:
       - name: Checkout fork main
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
       - name: Skip if an unresolved conflict PR is open
         id: guard
@@ -57,6 +61,16 @@ jobs:
 
           git remote add upstream https://github.com/NousResearch/hermes-agent.git
           git fetch upstream main
+
+          # The default GITHUB_TOKEN is intentionally prevented from changing
+          # workflow files. Avoid a noisy, permanently failing run when
+          # upstream has changed one; a maintainer can add the documented PAT
+          # secret and re-run this workflow to continue the sync.
+          workflow_changes="$(git diff --name-only "$(git merge-base HEAD upstream/main)" upstream/main -- .github/workflows)"
+          if [ -z "$UPSTREAM_SYNC_TOKEN" ] && [ -n "$workflow_changes" ]; then
+            echo "::warning::upstream/main includes workflow changes. Add repository secret UPSTREAM_SYNC_TOKEN (a PAT with repo + workflow scopes), then re-run this workflow."
+            exit 0
+          fi
 
           before="$(git rev-parse HEAD)"
 
