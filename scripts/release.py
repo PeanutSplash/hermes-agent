@@ -45,6 +45,14 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
+    "agent@agents-Mac-mini.local": "teknium1",  # upstream commit 80b58ec was committed by @teknium1 under an unlinked local agent identity
+    "geoffreybutler94@gmail.com": "geoffreybutler94",  # upstream merge contributor
+    "gigakun@agentmail.to": "gigakun3030",  # upstream merge contributor
+    "git@hode.co.uk": "okisdev",  # upstream merge contributor
+    "jakub.wolniewicz@gmail.com": "frizikk",  # upstream merge contributor
+    "markvlcek@gmail.com": "MarkVLK",  # upstream merge contributor
+    "nousbot@nousresearch.com": "nousbot-eng",  # upstream merge contributor
+    "theunathi@gmail.com": "UnathiCodex",  # upstream merge contributor
     "122438640+ragingbulld@users.noreply.github.com": "ragingbulld",  # PR #65606 salvage (non-finite API wait deadlines; #65746)
     "zzpigpinggai@users.noreply.github.com": "zzpigpinggai",  # PR #66017 salvage of #63617 (OpenRouter explicit-provider picker visibility)
     "sam7894604@gmail.com": "sam7894604",  # PR #55803 salvage (discord: /reasoning slash choices)
