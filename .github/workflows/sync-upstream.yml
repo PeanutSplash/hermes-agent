@@ -60,14 +60,19 @@ jobs:
 
           before="$(git rev-parse HEAD)"
 
-          # Happy path: clean fast-forward / auto-merge, push straight to main.
-          if git merge --no-edit upstream/main; then
-            after="$(git rev-parse HEAD)"
-            if [ "$before" = "$after" ]; then
-              echo "Fork main 已与 upstream/main 保持一致。"
+          # This fork owns its CI. Sync upstream code, but retain every local
+          # workflow file so upstream Actions changes cannot alter this fork's
+          # checks or require a workflow-scoped credential.
+          if git merge --no-commit --no-ff upstream/main; then
+            git restore --source="$before" --staged --worktree .github/workflows
+
+            if git diff --cached --quiet; then
+              git merge --abort 2>/dev/null || true
+              echo "upstream/main 没有需要同步的非工作流变更。"
             else
+              git commit --no-edit
               git push origin HEAD:main
-              echo "已自动合并 upstream/main 并推送到 fork main。"
+              echo "已自动合并 upstream/main 的非工作流变更并推送到 fork main。"
             fi
             exit 0
           fi
@@ -78,9 +83,15 @@ jobs:
 
           owner="${{ github.repository_owner }}"
 
-          # A stable branch pointing at upstream/main; the PR against main will
-          # surface the conflicts for manual resolution on GitHub or locally.
-          git branch -f "$SYNC_BRANCH" upstream/main
+          # A stable branch based on upstream/main, but with this fork's
+          # workflows restored. The PR surfaces code conflicts without syncing
+          # or requiring permissions for upstream CI changes.
+          git switch -C "$SYNC_BRANCH" upstream/main
+          git restore --source="$before" --staged --worktree .github/workflows
+          git add .github/workflows
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: preserve fork workflows during upstream sync"
+          fi
           git push -f origin "$SYNC_BRANCH"
 
           # Ensure the label exists so both PR creation and the guard can rely on it.
