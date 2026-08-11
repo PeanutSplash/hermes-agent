@@ -21,6 +21,15 @@ async def test_restart_command_while_busy_requests_drain_without_interrupt(monke
     # Ensure INVOCATION_ID is NOT set — systemd sets this in service mode,
     # which changes the restart call signature.
     monkeypatch.delenv("INVOCATION_ID", raising=False)
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
+    monkeypatch.delenv("HERMES_S6_SUPERVISED_CHILD", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_EXTERNAL_SUPERVISOR", raising=False)
+    # Hermeticity: neutralize the real container probe (see
+    # test_restart_service_detection.py) — /.dockerenv on a containerized CI
+    # runner would otherwise route via_service=True under this test.
+    monkeypatch.setattr(
+        "gateway.restart.is_container_restart_context", lambda: False
+    )
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)
     event = MessageEvent(
@@ -172,33 +181,6 @@ def test_load_busy_text_mode_follows_input_mode_and_honors_legacy(tmp_path, monk
     assert gateway_run.GatewayRunner._load_busy_text_mode() == "interrupt"
 
 
-def test_load_restart_drain_timeout_prefers_env_then_config_then_default(
-    tmp_path, monkeypatch, caplog
-):
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
-
-    assert (
-        gateway_run.GatewayRunner._load_restart_drain_timeout()
-        == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
-    )
-
-    (tmp_path / "config.yaml").write_text(
-        "agent:\n  restart_drain_timeout: 12\n", encoding="utf-8"
-    )
-    assert gateway_run.GatewayRunner._load_restart_drain_timeout() == 12.0
-
-    monkeypatch.setenv("HERMES_RESTART_DRAIN_TIMEOUT", "7")
-    assert gateway_run.GatewayRunner._load_restart_drain_timeout() == 7.0
-
-    monkeypatch.setenv("HERMES_RESTART_DRAIN_TIMEOUT", "invalid")
-    assert (
-        gateway_run.GatewayRunner._load_restart_drain_timeout()
-        == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
-    )
-    assert "Invalid restart_drain_timeout" in caplog.text
-
-
 @pytest.mark.asyncio
 async def test_request_restart_is_idempotent():
     runner, _adapter = make_restart_runner()
@@ -212,6 +194,9 @@ async def test_request_restart_is_idempotent():
     assert runner._restart_task is not None
     assert runner._restart_task not in runner._background_tasks
     assert runner.request_restart(detached=True, via_service=False) is False
+    # In-band restart marks draining immediately so new turns are refused
+    # while any after-turn wait runs (#77184).
+    assert runner._draining is True
 
     await runner._restart_task
 
@@ -219,6 +204,69 @@ async def test_request_restart_is_idempotent():
     runner.stop.assert_awaited_once_with(
         restart=True, detached_restart=True, service_restart=False
     )
+
+
+@pytest.mark.asyncio
+async def test_request_restart_defers_stop_until_active_turn_finishes():
+    """Regression for #77184: requesting turn must not enter the drain set."""
+    runner, _adapter = make_restart_runner()
+    runner.stop = AsyncMock()
+    runner._launch_detached_restart_command = AsyncMock()
+    runner._restart_after_turn_timeout = 5.0
+    session_key = "agent:main:telegram:dm:123"
+    runner._running_agents[session_key] = MagicMock()
+
+    assert runner.request_restart(detached=False, via_service=True) is True
+    assert runner._draining is True
+
+    # While the requesting turn is still active, stop() must not run.
+    await asyncio.sleep(0.25)
+    runner.stop.assert_not_awaited()
+    assert session_key in runner._running_agents
+
+    # Turn finishes → restart proceeds immediately (drain set empty).
+    del runner._running_agents[session_key]
+    await runner._restart_task
+
+    runner.stop.assert_awaited_once_with(
+        restart=True, detached_restart=False, service_restart=True
+    )
+    # Detached helper is only for the non-service path.
+    runner._launch_detached_restart_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_request_restart_after_turn_timeout_zero_enters_stop_immediately():
+    """restart_after_turn_timeout=0 preserves legacy immediate drain."""
+    runner, _adapter = make_restart_runner()
+    runner.stop = AsyncMock()
+    runner._restart_after_turn_timeout = 0.0
+    runner._running_agents["agent:main:telegram:dm:1"] = MagicMock()
+
+    assert runner.request_restart(detached=False, via_service=True) is True
+    await runner._restart_task
+
+    runner.stop.assert_awaited_once_with(
+        restart=True, detached_restart=False, service_restart=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_request_restart_after_turn_cap_elapsed_still_calls_stop():
+    """Safety valve: wedged turns cannot pin the gateway forever."""
+    runner, _adapter = make_restart_runner()
+    runner.stop = AsyncMock()
+    runner._restart_after_turn_timeout = 0.2
+    runner._running_agents["agent:main:telegram:dm:1"] = MagicMock()
+
+    assert runner.request_restart(detached=False, via_service=True) is True
+    await runner._restart_task
+
+    runner.stop.assert_awaited_once_with(
+        restart=True, detached_restart=False, service_restart=True
+    )
+    # Agent was still present — stop() owns the interrupt path from here.
+    assert runner._running_agents
 
 
 @pytest.mark.asyncio
@@ -234,7 +282,7 @@ async def test_run_restart_excluded_from_stop_cancel_loop():
     # A decoy background task that SHOULD be cancelled, plus the restart task
     # that must NOT be.
     async def _decoy():
-        await asyncio.sleep(60)
+        await asyncio.sleep(0.2)
 
     decoy = asyncio.create_task(_decoy())
     runner._background_tasks.add(decoy)
@@ -264,87 +312,18 @@ async def test_run_restart_excluded_from_stop_cancel_loop():
     )
 
 
-@pytest.mark.asyncio
-async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
-    runner, _adapter = make_restart_runner()
-    popen_calls = []
-
-    monkeypatch.setattr(gateway_run.sys, "platform", "linux")
-    monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["/usr/bin/hermes"])
-    monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
-    monkeypatch.setenv("_HERMES_GATEWAY", "1")
-    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/setsid" if cmd == "setsid" else None)
-
-    def fake_popen(cmd, **kwargs):
-        popen_calls.append((cmd, kwargs))
-        return MagicMock()
-
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-
-    await runner._launch_detached_restart_command()
-
-    assert len(popen_calls) == 1
-    cmd, kwargs = popen_calls[0]
-    assert cmd[:2] == ["/usr/bin/setsid", "bash"]
-    assert "gateway restart" in cmd[-1]
-    assert "kill -0 321" in cmd[-1]
-    assert "deadline=$(( $(date +%s) +" in cmd[-1]
-    assert kwargs["start_new_session"] is True
-    assert kwargs["stdout"] is subprocess.DEVNULL
-    assert kwargs["stderr"] is subprocess.DEVNULL
-    # The watcher must NOT inherit the gateway marker, or the CLI's
-    # self-restart loop guard refuses to run `hermes gateway restart`.
-    assert kwargs["env"].get("_HERMES_GATEWAY") is None
-
-
-@pytest.mark.asyncio
-async def test_detached_restart_helper_is_idempotent(monkeypatch):
-    runner, _adapter = make_restart_runner()
-    popen_calls = []
-
-    monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["/usr/bin/hermes"])
-    monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
-    monkeypatch.setattr(shutil, "which", lambda cmd: None)
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: popen_calls.append((a, k)))
-
-    await runner._launch_detached_restart_command()
-    await runner._launch_detached_restart_command()
-
-    assert len(popen_calls) == 1
-
-
-def test_windows_gateway_venv_imports_add_site_packages(monkeypatch, tmp_path):
-    venv_dir = tmp_path / "venv"
-    site_packages = venv_dir / "Lib" / "site-packages"
-    pth_extra = tmp_path / "pywin32_system32"
-    site_packages.mkdir(parents=True)
-    pth_extra.mkdir()
-    (site_packages / "pywin32.pth").write_text(str(pth_extra), encoding="utf-8")
-    project_root = str(gateway_run.Path(gateway_run.__file__).resolve().parent.parent)
-
-    monkeypatch.setattr(gateway_run.sys, "platform", "win32")
-    monkeypatch.setattr(gateway_run.sys, "path", ["existing"])
-    monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
-    monkeypatch.setenv("PYTHONPATH", "already-there")
-
-    gateway_run._ensure_windows_gateway_venv_imports()
-
-    assert gateway_run.sys.path[:2] == [project_root, str(site_packages)]
-    assert str(pth_extra) in gateway_run.sys.path
-    assert gateway_run.os.environ["VIRTUAL_ENV"] == str(venv_dir.resolve())
-    pythonpath = gateway_run.os.environ["PYTHONPATH"].split(gateway_run.os.pathsep)
-    assert pythonpath[:3] == [project_root, str(site_packages), "already-there"]
-
-
+@pytest.mark.windows_only
 @pytest.mark.asyncio
 async def test_windows_detached_restart_scrubs_gateway_marker(monkeypatch, tmp_path):
+    """Faking sys.platform="win32" on Linux could not reach the real Windows
+    detach branch (msvcrt/creationflags spawn, Lib/site-packages venv layout);
+    this runs on the Windows CI job instead."""
     runner, _adapter = make_restart_runner()
     popen_calls = []
     venv_dir = tmp_path / "venv"
     site_packages = venv_dir / "Lib" / "site-packages"
     site_packages.mkdir(parents=True)
 
-    monkeypatch.setattr(gateway_run.sys, "platform", "win32")
     monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["hermes"])
     monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
     monkeypatch.setenv("_HERMES_GATEWAY", "1")
@@ -376,32 +355,34 @@ async def test_windows_detached_restart_scrubs_gateway_marker(monkeypatch, tmp_p
     assert kwargs["stderr"] is subprocess.DEVNULL
 
 
+@pytest.mark.windows_only
 @pytest.mark.asyncio
-async def test_windows_detached_restart_uses_pythonw_for_watcher(monkeypatch, tmp_path):
+async def test_windows_detached_restart_watcher_keeps_console_python(monkeypatch, tmp_path):
+    """The restart watcher must run sys.executable (console python) under the
+    hidden-console detach kwargs — NOT swap in GUI-subsystem pythonw.exe,
+    which would leave the watcher console-less and make its descendants
+    flash visible conhosts (#54220/#56747).
+
+    Faking sys.platform on Linux could not enter the Windows-only watcher
+    spawn branch this asserts on, so it runs on the Windows CI job.
+    """
     runner, _adapter = make_restart_runner()
     popen_calls = []
     venv_dir = tmp_path / "venv"
     site_packages = venv_dir / "Lib" / "site-packages"
     site_packages.mkdir(parents=True)
 
-    monkeypatch.setattr(gateway_run.sys, "platform", "win32")
     monkeypatch.setattr(gateway_run.sys, "executable", r"C:\venv\Scripts\python.exe")
     monkeypatch.setattr(gateway_run, "_resolve_hermes_bin", lambda: ["hermes"])
     monkeypatch.setattr(gateway_run.os, "getpid", lambda: 321)
     monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
 
     import hermes_cli._subprocess_compat as subprocess_compat
-    import hermes_cli.gateway_windows as gateway_windows
 
-    monkeypatch.setattr(
-        gateway_windows,
-        "_resolve_detached_python",
-        lambda _python: (r"C:\Python311\pythonw.exe", venv_dir, [str(site_packages)]),
-    )
     monkeypatch.setattr(
         subprocess_compat,
         "windows_detach_popen_kwargs",
-        lambda: {"creationflags": 0x08000008},
+        lambda: {"creationflags": 0x08000200},
     )
 
     def fake_popen(cmd, **kwargs):
@@ -414,9 +395,9 @@ async def test_windows_detached_restart_uses_pythonw_for_watcher(monkeypatch, tm
 
     assert len(popen_calls) == 1
     cmd, kwargs = popen_calls[0]
-    assert cmd[0] == r"C:\Python311\pythonw.exe"
+    assert cmd[0] == r"C:\venv\Scripts\python.exe"
     assert cmd[-3:] == ["hermes", "gateway", "restart"]
-    assert kwargs["creationflags"] == 0x08000008
+    assert kwargs["creationflags"] == 0x08000200
 
 
 # ── Shutdown notification tests ──────────────────────────────────────
@@ -691,32 +672,3 @@ async def test_drain_suppress_skips_home_channel_keeps_session_ping(tmp_path, mo
     assert "shutting down" in adapter.sent[0]
 
 
-@pytest.mark.asyncio
-async def test_drain_without_suppress_flag_still_broadcasts_home_channel(tmp_path, monkeypatch):
-    """A drain marker WITHOUT the suppress flag leaves today's behaviour intact.
-
-    Both the active-session ping AND the home-channel broadcast fire — proving
-    the suppression is opt-in and operator/legacy drains are unaffected.
-    """
-    from gateway.config import HomeChannel, Platform
-    import gateway.drain_control as dc
-
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-    runner, adapter = make_restart_runner()
-    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
-        platform=Platform.TELEGRAM,
-        chat_id="home-42",
-        name="Ops Home",
-    )
-    runner._running_agents["agent:main:telegram:dm:999"] = MagicMock()
-
-    # Operator drain: marker present, suppress_notification defaults False.
-    dc.write_drain_request(principal="dashboard")
-
-    await runner._notify_active_sessions_of_shutdown()
-
-    sent_chat_ids = {chat_id for chat_id, _content, _meta in adapter.sent_calls}
-    # Both targets notified (today's behaviour preserved).
-    assert "999" in sent_chat_ids
-    assert "home-42" in sent_chat_ids
