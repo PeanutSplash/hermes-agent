@@ -46,11 +46,18 @@ _shared_clones: ContextVar[Optional[tuple[Path, dict]]] = ContextVar("plugin_sha
 def shared_clones():
     """Inside this block each pinned ``(url, commit, subdir)`` checkout is cloned from its remote once;
     later installs of it get a copy of that checkout. A failed clone is not reused: the next install
-    tries the remote again. Nothing outlives the block."""
+    tries the remote again. Nothing outlives the block. With no room for the copies (a read-only
+    temp dir) every install clones as it would outside the block."""
     if _shared_clones.get() is not None:
         yield
         return
-    with tempfile.TemporaryDirectory(prefix="hermes-plugin-clones-", ignore_cleanup_errors=True) as tmp:
+    try:
+        holder = tempfile.TemporaryDirectory(prefix="hermes-plugin-clones-", ignore_cleanup_errors=True)
+    except OSError:
+        logger.debug("no temporary directory for shared plugin clones; cloning per home", exc_info=True)
+        yield
+        return
+    with holder as tmp:
         token = _shared_clones.set((Path(tmp), {}))
         try:
             yield
@@ -78,13 +85,15 @@ def _clone_pinned(tmp_clone: Path, git_url: str, revision: Optional[str], subdir
             shutil.rmtree(tmp_clone, ignore_errors=True)
             del clones[key]
     head = _pc()._clone_plugin_repo(tmp_clone, git_url, revision, subdir)
-    copy = Path(tempfile.mkdtemp(dir=root)) / "plugin"
+    copy = None
     try:
+        copy = Path(tempfile.mkdtemp(dir=root)) / "plugin"
         shutil.copytree(tmp_clone, copy, symlinks=True)
         clones[key] = (copy, head)
     except OSError:
         logger.debug("could not keep the clone of %s for the next home", git_url, exc_info=True)
-        shutil.rmtree(copy, ignore_errors=True)
+        if copy is not None:
+            shutil.rmtree(copy, ignore_errors=True)
     return head
 
 

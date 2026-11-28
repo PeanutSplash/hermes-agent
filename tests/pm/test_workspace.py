@@ -370,6 +370,35 @@ def test_profiles_sharing_metadata_only_plugins_lock_one_member_each(layout):
     assert sum(name.startswith("hermes-plugin-") for name in locked) == 2
 
 
+def test_manifest_only_plugins_differing_only_in_separators_lock_as_one_member(layout):
+    """``acme-tools`` in one profile and ``acme_tools`` in another, with the same requirements: uv
+    reads both member names as one PEP 503 name, so they must be one member, not two that
+    collide (``Two workspace members are both named hermes-plugin-acme-tools-…``)."""
+    import tomllib
+
+    from tests.pm._fixtures import _wheel
+
+    tmp, core, _, _ = layout
+    _wheel(tmp / "wheels", "vendorlib")
+    plugins = []
+    for profile, name in (("home", "acme-tools"), ("work", "acme_tools")):
+        plugin = tmp / "homes" / profile / "plugins" / name
+        plugin.mkdir(parents=True)
+        (plugin / "plugin.yaml").write_text(f'name: {name}\npip_dependencies: ["vendorlib==1.0"]\n')
+        plugins.append(plugin)
+
+    root = tmp / "workspace"
+    environment = managed_environment(tmp / "env")
+    ws.lock_and_sync(plugins, [], root=root, source=core, seed_lock=None, environment=environment)
+
+    members = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["uv"]["workspace"]["members"]
+    assert len(members) == 1, members
+    locked = {p["name"] for p in tomllib.loads((root / "uv.lock").read_text())["package"]}
+    assert "vendorlib" in locked
+    assert sum(name.startswith("hermes-plugin-acme-tools-") for name in locked) == 1, locked
+    assert ws.members_stamp(plugins) == ws.members_stamp(plugins[:1])
+
+
 def test_classify_network_failure_stays_generic():
     from pm.workspace import ResolutionConflict, classify_uv_failure
 

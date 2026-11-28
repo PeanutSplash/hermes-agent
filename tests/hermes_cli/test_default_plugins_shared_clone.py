@@ -118,6 +118,48 @@ def test_one_pass_clones_each_pin_once_and_every_home_gets_the_same_install(worl
     assert not list((tmp_path / "systmp").glob("hermes-plugin-clones-*")), "the shared clones outlived the pass"
 
 
+def _refuse_mkdtemp(monkeypatch, refused=lambda prefix: True):
+    real = tempfile.mkdtemp
+
+    def mkdtemp(suffix=None, prefix=None, dir=None):
+        if refused(prefix):
+            raise PermissionError(13, "Permission denied", str(dir or tempfile.gettempdir()))
+        return real(suffix, prefix, dir)
+    monkeypatch.setattr(tempfile, "mkdtemp", mkdtemp)
+
+
+def test_a_read_only_temp_dir_never_fails_a_pass_with_nothing_to_clone(world, monkeypatch):
+    from hermes_cli import default_plugins
+    homes, entries, clones = world
+    default_plugins._install_defaults_for_homes(homes, say=lambda _line: None, lock=nullcontext,
+                                                entries=entries[:2])
+    clones.clear()
+    _refuse_mkdtemp(monkeypatch)
+
+    summary = default_plugins._install_defaults_for_homes(homes, say=lambda _line: None, lock=nullcontext,
+                                                          entries=entries[:2])
+
+    assert summary == {"installed": [], "owed": []}, summary
+    assert not clones
+
+
+def test_no_room_for_shared_clones_falls_back_to_one_clone_per_home(world, monkeypatch):
+    from hermes_cli import default_plugins
+    from hermes_cli.plugins_cmd_install import _shared_clones
+    homes, entries, clones = world
+    _refuse_mkdtemp(monkeypatch, lambda prefix: str(prefix or "").startswith("hermes-plugin-clones-"))
+
+    summary = default_plugins._install_defaults_for_homes(homes, say=lambda _line: None, lock=nullcontext,
+                                                          entries=entries[:2])
+
+    assert not summary["owed"], summary
+    assert sorted(summary["installed"]) == sorted(["alpha", "beta"] * len(homes)), summary
+    assert clones.count("alpha") == clones.count("beta") == len(homes), clones
+    assert _shared_clones.get() is None
+    for home in homes:
+        assert (home / "plugins" / "alpha" / "plugin.yaml").is_file(), home
+
+
 def test_a_single_home_pass_clones_as_before(world, monkeypatch):
     from hermes_cli import default_plugins, plugins_cmd_install
     homes, entries, clones = world

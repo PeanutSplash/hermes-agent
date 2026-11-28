@@ -125,9 +125,22 @@ def _requirements_inputs(declaration) -> dict:
 
 
 def _shared_member_key(identity: Path, inputs: dict) -> str:
-    """``<plugin dir name>-<sha256(inputs)[:16]>``: equal for every home carrying the same metadata."""
+    """``<plugin dir name>-<sha256(inputs)[:16]>``: equal for every home carrying the same metadata.
+
+    The name part is PEP 503-normalized: the key is also the member's package name
+    (``hermes-plugin-<key>``), and uv treats ``acme-tools`` and ``acme_tools`` as one name, so two
+    dirs differing only in separators must give one key, never two members named alike.
+    """
+    import re
+
     digest = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-    return f"{_member_name(identity)}-{digest}"
+    return f"{re.sub(r'[-_.]+', '-', _member_name(identity))}-{digest}"
+
+
+def shared_member_key(plugin_dir: Path) -> str | None:
+    """The shared workspace member *plugin_dir* builds as, or None for a member bound to its tree."""
+    inputs = _shared_member_inputs(read_python_declaration(plugin_dir))
+    return None if inputs is None else _shared_member_key(Path(plugin_dir), inputs)
 
 
 def _published_store_entries(directory: Path) -> frozenset[str]:

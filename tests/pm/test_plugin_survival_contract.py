@@ -781,6 +781,62 @@ def test_update_disables_a_shared_metadata_only_plugin_in_every_profile(admissio
     assert venv_is_current(project_root=core) is True
 
 
+@pytest.mark.skipif(not _uv_available(), reason="uv not on PATH")
+def test_shared_plugin_one_profile_re_enables_is_retried_in_the_other(admission_env, capsys):
+    """An update disabled a shared metadata-only plugin in two profiles. Once its dependency is
+    published and the user re-enables it in one profile, the next update retries (and re-enables)
+    the other profile's copy too: the member stamp counts the shared member once, so that copy's
+    fingerprint equals the failed attempt's, yet the member it builds as now builds."""
+    from pm.install import sync_venv, venv_is_current
+
+    tmp_path, home = admission_env
+    core = tmp_path / "core"
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    _fixtures._wheel(wheels, "member_dep")
+    manifest = core / "pyproject.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8")
+                        + f'[tool.uv]\nno-index = true\nfind-links = [{json.dumps(wheels.as_posix())}]\n',
+                        encoding="utf-8")
+    subprocess.run([shutil.which("uv"), "lock"], cwd=core, check=True, capture_output=True, timeout=120)
+    profile = home / "profiles" / "work"
+    for root in (home, profile):
+        ok, broken = root / "plugins" / "shared-ok", root / "plugins" / "shared-broken"
+        ok.mkdir(parents=True)
+        broken.mkdir(parents=True)
+        (ok / "plugin.yaml").write_text("name: shared-ok\npip_dependencies: ['member-dep==1.0']\n", encoding="utf-8")
+        (broken / "plugin.yaml").write_text("name: shared-broken\n", encoding="utf-8")
+        (broken / "pyproject.toml").write_text(
+            '[project]\nname="shared-broken"\nversion="1"\nrequires-python=">=3.11"\n'
+            'dependencies=["other-dep==9.9"]\n', encoding="utf-8")
+        _write_enabled(root, ["shared-ok", "shared-broken"])
+
+    sync_venv(explicit=True, evict_incompatible_plugins=True)
+    for root in (home, profile):
+        plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+        assert plugins["disabled"] == ["shared-broken"], root
+        assert "tried" in plugins["disabled_by_update"]["shared-broken"], root
+
+    _fixtures._wheel(wheels, "other_dep", "9.9")
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    config["plugins"]["enabled"] = ["shared-ok", "shared-broken"]
+    config["plugins"]["disabled"] = []
+    (home / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    capsys.readouterr()
+
+    sync_venv(explicit=True, evict_incompatible_plugins=True)
+
+    for root in (home, profile):
+        plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+        assert plugins["enabled"] == ["shared-ok", "shared-broken"], (root, plugins)
+        assert not plugins.get("disabled"), (root, plugins)
+    # The update's own edit to the other profile undoes its record (the hand-edited home's stale
+    # record is ignored: it no longer names a disabled plugin).
+    assert "disabled_by_update" not in yaml.safe_load((profile / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+    assert "still disabled" not in capsys.readouterr().err
+    assert venv_is_current(project_root=core) is True
+
+
 def test_active_context_home_exported_to_wrapper_subprocess(monkeypatch, tmp_path):
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tools.environments.local import build_subprocess_env

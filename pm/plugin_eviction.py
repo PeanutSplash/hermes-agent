@@ -325,7 +325,7 @@ class _EvictingUpdate:
                  entries: list[Entry], recorded: dict[Entry, dict], reasons: dict[Path, str],
                  waiting: dict[Path, str]):
         from pm.plugin_declarations import read_python_declaration
-        from pm.workspace import select_workspace_members
+        from pm.workspace import select_workspace_members, shared_member_key
 
         self.package, self.facts, self.fact, self.selection = package, facts, fact, selection
         self.explicit, self.configs, self.entries, self.reasons = explicit, configs, entries, reasons
@@ -357,11 +357,16 @@ class _EvictingUpdate:
             entry[2] for entry in self.joined if read_python_declaration(entry[2]).installs_packages
         ))
         baseline = list(dict.fromkeys([*self.kept, *self._static_joined_packages]))
+        # A metadata-only plugin another profile now builds as an enabled member is due whatever
+        # its fingerprint: the stamp counts the shared member once, so the copy enabled beside it
+        # gives the same fingerprint as the attempt that failed, yet that member now builds.
+        kept_shared = {key for plugin_dir in self.kept if (key := shared_member_key(plugin_dir)) is not None}
         # Those whose last failure was no verdict on the plugin (a download failure, a static
         # misfit since fixed) go first: they fitted beside the rest before.
         self.due = sorted((entry for entry, record in recorded.items()
                            if fits(entry[2]) and _needs_trial(entry[2])
-                           and record.get("tried") != self.fingerprint(entry[2], baseline)),
+                           and (record.get("tried") != self.fingerprint(entry[2], baseline)
+                                or shared_member_key(entry[2]) in kept_shared)),
                           key=lambda entry: "tried" in recorded[entry])
 
     def _effective_members(self, candidates: list[Path]) -> list[Path]:
