@@ -455,11 +455,15 @@ def test_deps_failure_after_commit_holds_the_paused_set_until_a_launch_syncs(w):
     toggle = w.sb.home / BREAK_DEPS
     # As users run: the suite-wide HERMES_DISABLE_LAZY_INSTALLS also turns off each launch's
     # dependency sync (venv_sync.prepare_launch), and with it the tree gate's dependency hold.
-    lazy = w.sb.env.pop("HERMES_DISABLE_LAZY_INSTALLS", None)
+    # The suite's child fence re-adds a popped switch, so this launch opts in explicitly.
+    lazy = w.sb.env.get("HERMES_DISABLE_LAZY_INSTALLS")
+    w.sb.env["HERMES_DISABLE_LAZY_INSTALLS"] = "0"
     try:
         _deps_failure_cell(w, toggle)
     finally:
-        if lazy is not None:
+        if lazy is None:
+            w.sb.env.pop("HERMES_DISABLE_LAZY_INSTALLS", None)
+        else:
             w.sb.env["HERMES_DISABLE_LAZY_INSTALLS"] = lazy
 
 

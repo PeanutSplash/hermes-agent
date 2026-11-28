@@ -89,7 +89,7 @@ def lazy_env(sb: I.Sandbox) -> dict[str, str]:
     """The sandbox env WITHOUT the suite-wide ``HERMES_DISABLE_LAZY_INSTALLS``: a real user's
     launch, which finishes an owed source-update tail before it imports the app."""
     env = dict(sb.env)
-    env.pop("HERMES_DISABLE_LAZY_INSTALLS", None)
+    env["HERMES_DISABLE_LAZY_INSTALLS"] = "0"  # explicit: the suite's child fence re-adds a popped switch
     return env
 
 

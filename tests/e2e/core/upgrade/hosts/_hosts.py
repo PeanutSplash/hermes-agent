@@ -51,7 +51,7 @@ def new_sandbox(root: Path, origin: Path) -> I.Sandbox:
     sandboxes run without it, as users do.
     """
     sb = I.new_sandbox(root, origin)
-    sb.env.pop("HERMES_DISABLE_LAZY_INSTALLS", None)
+    sb.env["HERMES_DISABLE_LAZY_INSTALLS"] = "0"  # explicit: the suite's child fence re-adds a popped switch
     return sb
 
 
