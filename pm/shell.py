@@ -16,16 +16,19 @@ Resolution order:
   3. Provisioned PATH: shutil.which("bash") — the store dirs are on the
      process PATH after pm.activate() ran.
   4. POSIX fallback table for non-bundle / daemon-launch PATH edge cases
-     (/usr/bin/bash, /bin/bash, $SHELL, /bin/sh). A systemd/cron-launched
-     gateway may have a minimal PATH and macOS /bin/bash is not on PATH by
-     default, so `which` alone is not enough there.
+     (/usr/bin, /bin, the Nix profiles, then $SHELL when it is bash). A
+     systemd/cron-launched gateway may have a minimal PATH and macOS /bin/bash
+     is not on PATH by default, so `which` alone is not enough there. See
+     posix_bash_candidates().
 """
 
 from __future__ import annotations
 
 import ntpath
 import os
+import posixpath
 import shutil
+import string
 import subprocess
 from collections.abc import Mapping
 
@@ -103,6 +106,32 @@ def _bash_starts(candidate: str) -> bool:
         return False
 
 
+# Where bash lives when PATH does not list it: the distribution's own dirs, then the Nix profiles
+# (NixOS and nix-darwin have no /usr/bin/bash, and a service unit's PATH names none of them).
+_POSIX_BASH_DIRS = (
+    "/usr/bin",
+    "/bin",
+    "/run/current-system/sw/bin",
+    "/etc/profiles/per-user/$USER/bin",
+    "$HOME/.nix-profile/bin",
+    "/nix/var/nix/profiles/default/bin",
+)
+
+
+def posix_bash_candidates(env: Mapping[str, str]) -> list[str]:
+    """Ordered bash candidates for a POSIX host whose PATH has no bash (a systemd,
+    launchd or cron launch), as pure data. The login shell counts only when it is
+    bash: every command script is bash syntax, and zsh or dash reads a redirection
+    on an fd above 9 (``114>&-``) as the word ``114`` followed by ``>&-``, which
+    closes the command's stdout."""
+    candidates = [posixpath.join(string.Template(d).safe_substitute(env), "bash")
+                  for d in _POSIX_BASH_DIRS]
+    login_shell = env.get("SHELL", "")
+    if posixpath.basename(login_shell) == "bash":
+        candidates.append(login_shell)
+    return list(dict.fromkeys(candidates))
+
+
 def bash() -> str | None:
     """Resolve the bash binary to use, or None if none is available."""
     staged = _staged_bash()
@@ -115,14 +144,5 @@ def bash() -> str | None:
                      if os.path.isfile(c) and _bash_starts(c)), None)
     if on_path:
         return on_path
-
-    # POSIX fallbacks for minimal-PATH daemon launches / macOS /bin/bash.
-    for candidate in (
-        "/usr/bin/bash",
-        "/bin/bash",
-        os.environ.get("SHELL"),
-        "/bin/sh",
-    ):
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return next((c for c in posix_bash_candidates(os.environ)
+                 if os.path.isfile(c) and os.access(c, os.X_OK)), None)
