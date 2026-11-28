@@ -336,9 +336,14 @@ def _install_defaults_for_homes(
         summary["owed"].append("live catalog")
     if not resolved_entries:
         return summary
+    from contextlib import nullcontext
+    from hermes_cli.plugins_cmd_install import shared_clones
     acquire_lock = lock if lock is not None else (lambda: installer_lock(wait))
     asked = time.monotonic()
-    with acquire_lock():  # never two installers in one home (an update tail beside a detached child)
+    # The lock: never two installers in one home (an update tail beside a detached child). Every home
+    # installs each entry at the same catalog pin, so one clone serves them all; each home's install
+    # still runs whole (kill list, scan, record, publish, enable) from its own copy of it.
+    with acquire_lock(), (shared_clones() if len(homes) > 1 else nullcontext()):
         locked = time.monotonic()
         for home in homes:
             try:

@@ -112,8 +112,10 @@ def test_copy_core_inputs_ignore_callback_works_through_long_root(tmp_path, monk
 def test_workspace_member_and_replay_copy_and_members_stamp_use_long_root(tmp_path, monkeypatch):
     plugin = tmp_path / "my-plugin"
     (plugin / "src").mkdir(parents=True)
+    # A packaged member: its whole tree is copied and hashed (a virtual one reads only its metadata).
     (plugin / "pyproject.toml").write_text(
-        '[project]\nname = "my-plugin"\nversion = "0.1.0"\ndependencies = ["requests"]\n',
+        '[project]\nname = "my-plugin"\nversion = "0.1.0"\ndependencies = ["requests"]\n'
+        '[tool.uv]\npackage = true\n',
         encoding="utf-8",
     )
     (plugin / "src" / "mod.py").write_text("VALUE = 1\n", encoding="utf-8")

@@ -49,12 +49,21 @@ def member_sources(plugin_dirs) -> dict[Path, Path]:
 
 
 def members_stamp(plugin_dirs) -> str:
-    """Hash the member inputs copied into a generation, independent of staging paths."""
+    """Hash the member inputs copied into a generation, independent of staging paths.
+
+    A metadata-only member counts by its content key (``_shared_member_key``), once however many
+    homes enable it: a profile enabling a plugin another profile already brings builds nothing new.
+    """
     h = hashlib.sha256()
+    shared: set[str] = set()
     for identity, entry in sorted(member_sources(plugin_dirs).items()):
+        declaration = read_python_declaration(entry)
+        inputs = _shared_member_inputs(declaration)
+        if inputs is not None:
+            shared.add(_shared_member_key(identity, inputs))
+            continue
         h.update(str(identity).encode("utf-8"))
         h.update(b"\0")
-        declaration = read_python_declaration(entry)
         for source in declaration.files:
             h.update(source.name.encode("utf-8"))
             h.update(source.read_bytes())
@@ -69,7 +78,56 @@ def members_stamp(plugin_dirs) -> str:
                     h.update(b"\0")
                     h.update(os.readlink(path).encode() if path.is_symlink() else path.read_bytes())
                     h.update(b"\0")
+    for key in sorted(shared):
+        h.update(b"shared\0")
+        h.update(key.encode("utf-8"))
+        h.update(b"\0")
     return h.hexdigest()
+
+
+# What uv reads from a metadata-only (virtual) member: it never builds one, so no other file of
+# the plugin reaches the lock. Any other [tool.uv] setting may name a path or steer resolution,
+# so a member carrying one stays bound to its own tree.
+_SHARED_PROJECT_KEYS = frozenset({"name", "version", "requires-python", "dependencies", "optional-dependencies"})
+_SHARED_UV_KEYS = frozenset({"package", "conflicts", "default-groups", "dev-dependencies", "dependency-groups"})
+
+
+def _shared_member_inputs(declaration) -> dict | None:
+    """Everything a metadata-only member is generated from, or None for a member bound to its tree.
+
+    Manifest-only members and virtual pyprojects (no build backend, no ``tool.uv.package = true``,
+    no ``tool.uv.sources``, nothing dynamic) are generated from their declared metadata alone, so
+    the same plugin enabled in many homes is one workspace member. Readme, license files and the
+    plugin's code are never read for them.
+    """
+    import tomllib
+
+    if declaration.pyproject is None:
+        return _requirements_inputs(declaration)
+    document = tomllib.loads(declaration.pyproject.read_text(encoding="utf-8-sig"))
+    project = document["project"]
+    uv = document.get("tool", {}).get("uv", {})
+    if ("build-system" in document or uv.get("package") is True or project.get("dynamic")
+            or not uv.keys() <= _SHARED_UV_KEYS):
+        return None
+    inputs = {**_requirements_inputs(declaration),
+              "project": {key: value for key, value in project.items() if key in _SHARED_PROJECT_KEYS}}
+    if uv:
+        inputs["tool"] = {"uv": uv}
+    if "dependency-groups" in document:
+        inputs["dependency-groups"] = document["dependency-groups"]
+    return inputs
+
+
+def _requirements_inputs(declaration) -> dict:
+    """A manifest-only member is generated from its installable requirements alone."""
+    return {"requirements": list(declaration.install_requirements)}
+
+
+def _shared_member_key(identity: Path, inputs: dict) -> str:
+    """``<plugin dir name>-<sha256(inputs)[:16]>``: equal for every home carrying the same metadata."""
+    digest = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+    return f"{_member_name(identity)}-{digest}"
 
 
 def _published_store_entries(directory: Path) -> frozenset[str]:
@@ -177,8 +235,9 @@ def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Pat
                for entry in declaring.values())
         else {}
     )
-    members = [_workspace_member(entry, root, identity=identity, extras=extras, target=target)
-               .relative_to(root).as_posix() for identity, entry in candidates.items()]
+    # A set: homes sharing one metadata-only plugin share its member.
+    members = {_workspace_member(entry, root, identity=identity, extras=extras, target=target)
+               .relative_to(root).as_posix() for identity, entry in candidates.items()}
 
     if members:
         import tomllib
@@ -453,12 +512,16 @@ def build_member_dirs(extras: Iterable[str], python: Path | None = None) -> list
 def _member_key(identity: Path) -> str:
     """``<plugin dir name>-<sha256(path)[:16]>``: the hash keeps two same-named plugins from
     different homes apart; the name is what a user sees in uv's conflict text
-    (``hermes-plugin-<key> depends on …``) — a bare hash told them nothing to disable."""
+    (``hermes-plugin-<key> depends on …``) — a bare hash told them nothing to disable.
+    Only members bound to their tree use it; metadata-only ones use ``_shared_member_key``."""
+    digest = hashlib.sha256(str(identity.resolve()).encode()).hexdigest()[:16]
+    return f"{_member_name(identity)}-{digest}"
+
+
+def _member_name(identity: Path) -> str:
     import re
 
-    digest = hashlib.sha256(str(identity.resolve()).encode()).hexdigest()[:16]
-    name = re.sub(r"[^a-z0-9._-]+", "-", identity.name.lower()).strip("-.") or "plugin"
-    return f"{name}-{digest}"
+    return re.sub(r"[^a-z0-9._-]+", "-", identity.name.lower()).strip("-.") or "plugin"
 
 
 def _prune_member_sources(settings: dict, installed: set[str]) -> bool:
@@ -650,16 +713,60 @@ def hermes_fit_error(declaration, extras: Iterable[str] | None = None) -> Option
     return requires_hermes_error(declaration.manifest) or core_requirement_error(declaration, extras)
 
 
+def _project_member_metadata(document: dict, declaration, name: str | None, extras: Iterable[str],
+                             target: Mapping[str, str] | None) -> bool:
+    """Project a member's pyproject *document* onto what this generation installs; *name* renames a
+    virtual member. Whether anything changed."""
+    changed = False
+    if declaration.install_requirements != declaration.requirements:
+        document["project"]["dependencies"] = list(declaration.install_requirements)
+        changed = True
+    if name is not None:
+        # Before the extras pass, so its self-reference closure reads the names uv will see.
+        _rename_virtual_member(document, name)
+    return _runtime_member_metadata(document, extras, target) or changed
+
+
+def _default_member_version(document: dict) -> bool:
+    """uv rejects any [project] table whose version is neither set nor dynamic, at parse time and
+    for buildable members too, so a version-less member would abort every `uv lock` of the
+    workspace: give it the same inert version plugin-deps use. PEP 621 forbids a static version
+    while "version" is listed under project.dynamic, so an explicitly dynamic one is left alone."""
+    project = document.get("project")
+    if project is not None and "version" not in project and "version" not in project.get("dynamic", ()):
+        project["version"] = "0.0.0"
+        return True
+    return False
+
+
 def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path, extras: Iterable[str] = (),
                       target: Mapping[str, str] | None = None) -> Path:
-    """Keep workspace members with their generation, not a temporary install clone."""
+    """Keep workspace members with their generation, not a temporary install clone.
+
+    A metadata-only member is keyed by its content (``_shared_member_inputs``), so every home
+    carrying the same plugin returns the same member; one bound to its tree is a copy of that
+    tree keyed by its installed path.
+    """
     import json
     import tomllib
 
-    key = _member_key(identity)
     declaration = read_python_declaration(plugin_dir)
     pyproject = declaration.pyproject
+    shared = _shared_member_inputs(declaration)
+    if pyproject is not None and shared is not None:
+        # Only the declared metadata, never the plugin's files: uv does not build a virtual member.
+        document = {key: value for key, value in shared.items() if key != "requirements"}
+        key = _shared_member_key(identity, shared)
+        member = root / "plugin-sources" / key
+        _project_member_metadata(document, declaration, f"hermes-plugin-{key}", extras, target)
+        _default_member_version(document)
+        import tomli_w
+
+        member.mkdir(parents=True, exist_ok=True)  # another home's copy wrote these same bytes
+        (member / "pyproject.toml").write_text(tomli_w.dumps(document), encoding="utf-8")
+        return member
     if pyproject is not None:
+        key = _member_key(identity)
         member = root / "plugin-sources" / key
         shutil.copytree(long_root(plugin_dir), long_root(member), symlinks=True,
                         ignore=_member_ignored)
@@ -672,14 +779,8 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path, extras: I
         # package metadata its backend produces.
         # tool.uv.package = true opts into uv package mode: real build metadata, so buildable.
         virtual = "build-system" not in document and document.get("tool", {}).get("uv", {}).get("package") is not True
-        changed = False
-        if declaration.install_requirements != declaration.requirements:
-            document["project"]["dependencies"] = list(declaration.install_requirements)
-            changed = True
-        if virtual:
-            # Before the extras pass, so its self-reference closure reads the names uv will see.
-            _rename_virtual_member(document, f"hermes-plugin-{key}")
-        changed = _runtime_member_metadata(document, extras, target) or changed
+        changed = _project_member_metadata(document, declaration, f"hermes-plugin-{key}" if virtual else None,
+                                           extras, target)
         for sources in document.get("tool", {}).get("uv", {}).get("sources", {}).values():
             for spec in sources if isinstance(sources, list) else [sources]:
                 if not isinstance(spec, dict) or "path" not in spec:
@@ -692,23 +793,16 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path, extras: I
                     continue  # The referenced tree was copied with this member.
                 spec["path"] = (identity / relative).resolve().as_posix()
                 changed = True
-        project = document.get("project")
-        # uv rejects any [project] table whose version is neither set nor dynamic, at
-        # parse time and for buildable members too, so a version-less member would abort
-        # every `uv lock` of the workspace. Give it the same inert version plugin-deps use.
-        # PEP 621 forbids a static version while "version" is listed under
-        # project.dynamic, so an explicitly dynamic version is left alone.
-        if project is not None and "version" not in project and "version" not in project.get("dynamic", ()):
-            project["version"] = "0.0.0"
-            changed = True
+        changed = _default_member_version(document) or changed
         if virtual or changed:
             import tomli_w
 
             (member / "pyproject.toml").write_text(tomli_w.dumps(document), encoding="utf-8")
         return member
     specs = declaration.install_requirements
+    key = _shared_member_key(identity, _requirements_inputs(declaration))
     member = root / "plugin-deps" / key
-    member.mkdir(parents=True)
+    member.mkdir(parents=True, exist_ok=True)  # another home's copy writes these same bytes
     (member / "pyproject.toml").write_text(
         f'[project]\nname = "hermes-plugin-{key}"\nversion = "0.0.0"\n'
         'requires-python = ">=3.11"\n'

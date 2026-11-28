@@ -335,6 +335,41 @@ def test_virtual_plugin_self_references_follow_the_rename_everywhere(layout):
     assert document["tool"]["uv"]["conflicts"] == [[{"package": name, "extra": "a"}, {"extra": "b"}]]
 
 
+def test_profiles_sharing_metadata_only_plugins_lock_one_member_each(layout):
+    """Ten profiles carrying the same default plugins (a virtual pyproject whose readme is not
+    snapshotted, and a manifest-only plugin) lock and sync as one member per plugin."""
+    import tomllib
+
+    tmp, core, _, _ = layout
+    plugins = []
+    for index in range(10):
+        home = tmp / "homes" / f"profile-{index}" / "plugins"
+        qqbot, weixin = home / "qqbot", home / "weixin"
+        qqbot.mkdir(parents=True)
+        weixin.mkdir()
+        (qqbot / "plugin.yaml").write_text("name: qqbot\n")
+        (qqbot / "pyproject.toml").write_text(
+            '[project]\nname="hermes-qqbot"\nversion="2.0.0"\nreadme="README.md"\nrequires-python=">=3.11"\n'
+            'dependencies=["member-dep==1.0"]\n[project.optional-dependencies]\nsilk=["other-dep==1.0"]\n')
+        (qqbot / "README.md").write_text(f"profile {index}\n")
+        (qqbot / "adapter.py").write_text(f"PROFILE = {index}\n")
+        (weixin / "plugin.yaml").write_text('name: weixin\npip_dependencies: ["chosen-dep==1.0"]\n')
+        plugins += [qqbot, weixin]
+    assert len({ws.members_stamp(plugins[:2 * count]) for count in range(1, 11)}) == 1
+
+    root = tmp / "workspace"
+    environment = managed_environment(tmp / "env")
+    ws.lock_and_sync(plugins, [], root=root, source=core, seed_lock=None, environment=environment)
+
+    members = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["uv"]["workspace"]["members"]
+    assert sorted(Path(member).parent.name for member in members) == ["plugin-deps", "plugin-sources"]
+    [snapshot] = (root / "plugin-sources").iterdir()
+    assert [path.name for path in snapshot.iterdir()] == ["pyproject.toml"]
+    locked = {p["name"] for p in tomllib.loads((root / "uv.lock").read_text())["package"]}
+    assert {"member-dep", "chosen-dep", "other-dep"} <= locked
+    assert sum(name.startswith("hermes-plugin-") for name in locked) == 2
+
+
 def test_classify_network_failure_stays_generic():
     from pm.workspace import ResolutionConflict, classify_uv_failure
 

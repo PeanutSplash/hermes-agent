@@ -36,6 +36,58 @@ def shared_dependency_answers():
         _shared_answers.reset(token)
 
 
+# Pinned checkouts already cloned in this block, reused while one catalog entry is installed into
+# several profile homes (the default plugins on ``hermes update``): ``(url, commit, subdir)`` ->
+# ``(copy, head)``, with the copies under a temporary directory removed when the block ends.
+_shared_clones: ContextVar[Optional[tuple[Path, dict]]] = ContextVar("plugin_shared_clones", default=None)
+
+
+@contextmanager
+def shared_clones():
+    """Inside this block each pinned ``(url, commit, subdir)`` checkout is cloned from its remote once;
+    later installs of it get a copy of that checkout. A failed clone is not reused: the next install
+    tries the remote again. Nothing outlives the block."""
+    if _shared_clones.get() is not None:
+        yield
+        return
+    with tempfile.TemporaryDirectory(prefix="hermes-plugin-clones-", ignore_cleanup_errors=True) as tmp:
+        token = _shared_clones.set((Path(tmp), {}))
+        try:
+            yield
+        finally:
+            _shared_clones.reset(token)
+
+
+def _clone_pinned(tmp_clone: Path, git_url: str, revision: Optional[str], subdir: Optional[str]) -> str:
+    """``_clone_plugin_repo``, served from :func:`shared_clones` for a commit already cloned in its block.
+    Only an exact commit is shared: a branch may move between two installs."""
+    import shutil
+
+    shared = _shared_clones.get()
+    if shared is None or revision is None:
+        return _pc()._clone_plugin_repo(tmp_clone, git_url, revision, subdir)
+    root, clones = shared
+    key = (git_url, revision, subdir)
+    if key in clones:
+        copy, head = clones[key]
+        try:
+            shutil.copytree(copy, tmp_clone, symlinks=True)
+            return head
+        except OSError:  # a local copy that fails costs a clone, never the install
+            logger.debug("shared plugin clone of %s unusable; cloning again", git_url, exc_info=True)
+            shutil.rmtree(tmp_clone, ignore_errors=True)
+            del clones[key]
+    head = _pc()._clone_plugin_repo(tmp_clone, git_url, revision, subdir)
+    copy = Path(tempfile.mkdtemp(dir=root)) / "plugin"
+    try:
+        shutil.copytree(tmp_clone, copy, symlinks=True)
+        clones[key] = (copy, head)
+    except OSError:
+        logger.debug("could not keep the clone of %s for the next home", git_url, exc_info=True)
+        shutil.rmtree(copy, ignore_errors=True)
+    return head
+
+
 def _ask_yes_no(key: tuple, prompt: str, console) -> bool:
     answers = _shared_answers.get()
     if answers is not None and key in answers:
@@ -390,13 +442,13 @@ def _clone_at_reviewed_commit(tmp_clone: Path, git_url: str, requested_revision:
     (possibly an annotated tag), which a re-pin since the dialog opened moves: the commit actually checked
     out is what must equal the reviewed one."""
     if not inspected_sha:
-        return _pc()._clone_plugin_repo(tmp_clone, git_url, requested_revision, subdir)
+        return _clone_pinned(tmp_clone, git_url, requested_revision, subdir)
     sha = _pc()._normalize_exact_revision(inspected_sha)
     if not catalog_pin and requested_revision is not None and requested_revision != sha:
         raise _pc().PluginOperationError(
             f"This plugin is pinned to commit {requested_revision[:12]}, not the commit {sha[:12]} you reviewed. "
             "Reinstall it with that pin, or re-open the install dialog.", failure_class="already_installed")
-    head = _pc()._clone_plugin_repo(tmp_clone, git_url, requested_revision, subdir)
+    head = _clone_pinned(tmp_clone, git_url, requested_revision, subdir)
     git_exe = _pc()._resolve_git_executable()
     if git_exe:
         sha = _pc()._git_resolve_commit(tmp_clone, git_exe, sha)

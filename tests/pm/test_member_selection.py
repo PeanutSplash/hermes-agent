@@ -21,40 +21,42 @@ def test_scoped_members_respect_disabled_and_keep_other_profiles(tmp_path, monke
 def test_manifest_only_member_is_named_after_its_plugin_dir_and_stays_unique(tmp_path):
     """uv's conflict text names the workspace member (``hermes-plugin-<key> depends on …``);
     a bare path hash left the user with nothing to disable. Two same-named plugins from
-    different homes must still be distinct members."""
+    different homes are one member when they declare the same requirements, distinct otherwise."""
     import tomllib
     from pm.workspace import _workspace_member
 
     members = []
-    for home in ("home-a", "home-b"):
+    for home, dependency in (("home-a", "left-pad-py"), ("home-b", "left-pad-py"), ("home-c", "right-pad-py")):
         plugin = tmp_path / home / "plugins" / "My Plugin!"
         plugin.mkdir(parents=True)
-        (plugin / "plugin.yaml").write_text("name: my-plugin\npip_dependencies: [left-pad-py]\n", encoding="utf-8")
+        (plugin / "plugin.yaml").write_text(f"name: my-plugin\npip_dependencies: [{dependency}]\n", encoding="utf-8")
         root = tmp_path / f"gen-{home}"
         root.mkdir()
         members.append(_workspace_member(plugin, root, identity=plugin))
     names = [tomllib.loads((m / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"] for m in members]
     assert all(name.startswith("hermes-plugin-my-plugin-") for name in names), names
-    assert names[0] != names[1]
-    assert members[0].name != members[1].name
+    assert names[0] == names[1] and members[0].name == members[1].name
+    assert names[0] != names[2]
+    assert members[0].name != members[2].name
 
 
 def test_pyproject_member_is_renamed_by_its_key_and_stays_unique(tmp_path):
     """A plugin that ships its own pyproject declares its real [project].name, and
     uv identifies workspace members by that name — enabling the plugin in two
     profiles then fails ``uv lock`` with "Two workspace members are both named
-    …". Rename metadata-only members by their unique key, like manifest-only
-    ones; a buildable member keeps the name its package metadata reports."""
+    …". Rename metadata-only members by their content key, like manifest-only
+    ones (the same plugin in two profiles is one member); a buildable member keeps
+    the name its package metadata reports."""
     import tomllib
     from pm.workspace import _workspace_member
 
     members = []
-    for home in ("home-a", "home-b"):
+    for home, pin in (("home-a", ">=0.10.1"), ("home-b", ">=0.10.1"), ("home-c", ">=0.11")):
         plugin = tmp_path / home / "plugins" / "hindsight"
         plugin.mkdir(parents=True)
         (plugin / "pyproject.toml").write_text(
             '[project]\nname = "hermes-plugin-hindsight"\nversion = "1.0.0"\n'
-            'dependencies = ["hindsight-client>=0.10.1"]\n',
+            f'dependencies = ["hindsight-client{pin}"]\n',
             encoding="utf-8",
         )
         root = tmp_path / f"gen-{home}"
@@ -62,7 +64,8 @@ def test_pyproject_member_is_renamed_by_its_key_and_stays_unique(tmp_path):
         members.append(_workspace_member(plugin, root, identity=plugin))
     names = [tomllib.loads((m / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"] for m in members]
     assert all(name.startswith("hermes-plugin-hindsight-") for name in names), names
-    assert names[0] != names[1]
+    assert names[0] == names[1]
+    assert names[0] != names[2]
     document = tomllib.loads((members[0] / "pyproject.toml").read_text(encoding="utf-8"))
     assert document["project"]["version"] == "1.0.0"
     assert document["project"]["dependencies"] == ["hindsight-client>=0.10.1"]

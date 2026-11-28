@@ -730,6 +730,57 @@ def test_update_sync_retries_a_fetch_failure_once_before_disabling(admission_env
     assert venv_is_current(project_root=tmp_path / "core") is True
 
 
+@pytest.mark.skipif(not _uv_available(), reason="uv not on PATH")
+def test_update_disables_a_shared_metadata_only_plugin_in_every_profile(admission_env):
+    """Profiles carrying the same metadata-only plugin share one workspace member. When it no
+    longer resolves, the update disables it in BOTH profiles (each copy is tried, and fails,
+    on its own), keeps the shared plugin that still builds, and the next update is a no-op."""
+    import tomllib
+
+    from pm.environments import runtime_facts_path
+    from pm.install import sync_venv, venv_is_current
+    from pm.lock import Facts
+
+    tmp_path, home = admission_env
+    core = tmp_path / "core"
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    _fixtures._wheel(wheels, "member_dep")
+    manifest = core / "pyproject.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8")
+                        + f'[tool.uv]\nno-index = true\nfind-links = [{json.dumps(wheels.as_posix())}]\n',
+                        encoding="utf-8")
+    subprocess.run([shutil.which("uv"), "lock"], cwd=core, check=True, capture_output=True, timeout=120)
+    profile = home / "profiles" / "work"
+    for root in (home, profile):
+        ok, broken = root / "plugins" / "shared-ok", root / "plugins" / "shared-broken"
+        ok.mkdir(parents=True)
+        broken.mkdir(parents=True)
+        (ok / "plugin.yaml").write_text("name: shared-ok\npip_dependencies: ['member-dep==1.0']\n", encoding="utf-8")
+        (broken / "plugin.yaml").write_text("name: shared-broken\n", encoding="utf-8")
+        (broken / "pyproject.toml").write_text(
+            '[project]\nname="shared-broken"\nversion="1"\nrequires-python=">=3.11"\n'
+            'dependencies=["member-dep==9.9"]\n', encoding="utf-8")
+        _write_enabled(root, ["shared-ok", "shared-broken"])
+
+    sync_venv(explicit=True, evict_incompatible_plugins=True)
+
+    for root in (home, profile):
+        plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+        assert plugins["enabled"] == ["shared-ok"], root
+        assert plugins["disabled"] == ["shared-broken"], root
+        assert "shared-broken" in plugins["disabled_by_update"], root
+    workspace = Path(Facts(runtime_facts_path(core), strict=True).get("venv")["resolved_lock"]).parent
+    members = tomllib.loads((workspace / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["uv"]["workspace"]["members"]
+    assert [Path(member).name.rsplit("-", 1)[0] for member in members] == ["shared-ok"]
+    assert venv_is_current(project_root=core) is True
+
+    configs = [(root / "config.yaml").read_bytes() for root in (home, profile)]
+    sync_venv(explicit=True, evict_incompatible_plugins=True)
+    assert [(root / "config.yaml").read_bytes() for root in (home, profile)] == configs
+    assert venv_is_current(project_root=core) is True
+
+
 def test_active_context_home_exported_to_wrapper_subprocess(monkeypatch, tmp_path):
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tools.environments.local import build_subprocess_env
