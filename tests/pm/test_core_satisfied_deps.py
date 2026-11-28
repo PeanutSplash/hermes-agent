@@ -1086,3 +1086,63 @@ def test_assess_workspace_membership_single_source_of_truth(tmp_path):
     assert needs_workspace_member(multi_decl, project_root=REPO_ROOT) is multi_res.needs_member
 
 
+
+
+# ── [project.optional-dependencies]: only an extra a PM sync can select installs ──
+
+
+_QQBOT_SHAPE = (
+    '[project]\nname = "qqbot-shape"\nversion = "2.0.0"\nrequires-python = ">=3.11"\n'
+    'dependencies = ["aiohttp>=3.14.5,<4", "httpx>=0.28.1,<1", "qrcode>=7.4.2,<8"]\n'
+)
+
+
+@pytest.mark.parametrize("extras_toml", [
+    '[project.optional-dependencies]\nplugin-only = ["langfuse==4.15.2"]\n',
+    # Core's own `silk` extra pins pilk==0.2.4, so selecting it installs nothing new.
+    '[project.optional-dependencies]\nsilk = ["pilk>=0.2.4,<0.3"]\n',
+], ids=["extra-no-hermes-sync-selects", "extra-core-same-extra-pins"])
+def test_inert_optional_extra_with_core_satisfied_deps_skips_workspace_membership(tmp_path, extras_toml):
+    decl = read_python_declaration(_write_plugin(tmp_path / "inert-extra", pyproject=_QQBOT_SHAPE + extras_toml))
+    assert decl.pyproject_installs is True  # dependency consent and stamps still see the extra
+    assessment = assess_workspace_membership(decl, project_root=REPO_ROOT)
+    assert assessment == WorkspaceMembershipAssessment(
+        needs_member=False, reasons=(), unsatisfied_requirements=(), pyproject_installs=False)
+    assert needs_workspace_member(decl, project_root=REPO_ROOT) is False
+
+
+@pytest.mark.parametrize("extra_toml, token", [
+    # Named like a core extra, so `--extra telegram` selects it, and core does not provide it.
+    ('[project.optional-dependencies]\ntelegram = ["langfuse==4.15.2"]\n', "[project.optional-dependencies]"),
+    ('[project.optional-dependencies]\nsilk = ["pilk>=0.3"]\n', "[project.optional-dependencies]"),
+    # A base self-reference installs a plugin-only extra on every sync.
+    ('[project.optional-dependencies]\nplugin-only = ["langfuse==4.15.2"]\n', "[project.optional-dependencies]"),
+    ('[dependency-groups]\ndev = ["pytest"]\n', "[dependency-groups]"),
+    ('[tool.uv]\ndev-dependencies = ["pytest"]\n', "tool.uv.dev-dependencies"),
+    ('[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n', "[build-system]"),
+    ('[tool.uv]\npackage = true\n', "tool.uv.package = true"),
+], ids=["hermes-extra-new-package", "hermes-extra-outside-core-pin", "self-referenced-extra",
+        "dependency-groups", "dev-dependencies", "build-system", "uv-package"])
+def test_installing_pyproject_features_still_require_workspace_member(tmp_path, extra_toml, token):
+    pyproject = _QQBOT_SHAPE + extra_toml
+    if "plugin-only" in extra_toml:
+        pyproject = pyproject.replace('"qrcode>=7.4.2,<8"]', '"qrcode>=7.4.2,<8", "qqbot-shape[plugin-only]"]')
+    decl = read_python_declaration(_write_plugin(tmp_path / "installs", pyproject=pyproject))
+    assessment = assess_workspace_membership(decl, project_root=REPO_ROOT)
+    assert assessment.needs_member is True
+    if "plugin-only" not in extra_toml:
+        assert assessment.pyproject_installs is True
+        assert any(token in reason for reason in assessment.reasons), assessment.reasons
+    assert needs_workspace_member(decl, project_root=REPO_ROOT) is True
+
+
+def test_unreadable_core_extras_keep_optional_dependencies_conservative(tmp_path):
+    core = tmp_path / "core"
+    core.mkdir()
+    (core / "pyproject.toml").write_text("not = [toml\n", encoding="utf-8")
+    shutil.copy(REPO_ROOT / "uv.lock", core / "uv.lock")
+    decl = read_python_declaration(_write_plugin(
+        tmp_path / "plug", pyproject=_QQBOT_SHAPE + '[project.optional-dependencies]\nsilk = ["pilk>=0.2.4,<0.3"]\n'))
+    assessment = assess_workspace_membership(decl, project_root=core)
+    assert assessment.needs_member is True
+    assert any("[project.optional-dependencies]" in reason for reason in assessment.reasons)

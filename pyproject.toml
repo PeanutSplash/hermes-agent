@@ -115,6 +115,12 @@ dependencies = [
   # cryptography<49, so [tool.uv] also holds an override. Read that comment
   # before you move this version.
   "cryptography==50.0.2; python_version >= '3.14'",  # CVE-2026-69247, GHSA-m2h6-j472-rp4c, GHSA-jwv3-5hgf-82ww, CVE-2026-39892, CVE-2026-34073, GHSA-537c-gmf6-5ccf
+  # The weixin and qqbot catalog plugins are `default: true` and need these.
+  # Core's base environment provides them, so enabling either plugin joins no
+  # uv workspace and rebuilds no venv. The extras below still list them for
+  # installs older than 3.14.
+  "aiohttp==3.14.5; python_version >= '3.14'",  # prior CVEs + GHSA-9xw5-w5jj-pvcg/GHSA-2g87-pp6c-29x5/GHSA-5wr8-gcqf-gqf3 family
+  "qrcode==7.4.2; python_version >= '3.14'",
   # Windows has no IANA tzdata shipped with the OS, so Python's ``zoneinfo``
   # (PEP 615) raises ``ZoneInfoNotFoundError`` for every non-UTC timezone
   # out of the box.  ``tzdata`` ships the Olson database as a data package

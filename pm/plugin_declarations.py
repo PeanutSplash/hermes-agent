@@ -263,6 +263,7 @@ def read_core_base_closure(
     project_root: Path | None = None,
     *,
     target_env: Mapping[str, str] | None = None,
+    root_extras: Iterable[str] = (),
 ) -> CoreBaseClosure | None:
     """Resolve Hermes core's guaranteed base dependency closure from ``<core_root> / 'uv.lock'``.
 
@@ -270,7 +271,8 @@ def read_core_base_closure(
     ``dev-dependencies``, or any plugin generation), evaluating PEP 508 markers against
     *target_env*. Defaults *project_root* to the canonical core root (never a generation
     ``workspace/``). Returns ``None`` if the root or lockfile is missing, unreadable, malformed,
-    or does not cover *target_env*, so callers fail conservatively.
+    or does not cover *target_env*, so callers fail conservatively. *root_extras* adds the
+    closure of those core extras, as a sync selecting them installs it.
     """
     from packaging.markers import default_environment
     from packaging.utils import canonicalize_name
@@ -285,11 +287,13 @@ def read_core_base_closure(
     except OSError:
         return None
     env = dict(default_environment()) if target_env is None else dict(target_env)
-    cache_key = (lock_path, stat.st_mtime_ns, stat.st_size, tuple(sorted(env.items())))
+    selected = tuple(sorted({_normalize_extra(str(extra)) for extra in root_extras}))
+    cache_key = (lock_path, stat.st_mtime_ns, stat.st_size, tuple(sorted(env.items())), selected)
     if cache_key in _CORE_LOCK_CLOSURE_CACHE:
         return _CORE_LOCK_CLOSURE_CACHE[cache_key]
 
-    result = _parse_core_base_closure(lock_path, root, env, canonicalize_name, Version, InvalidVersion)
+    result = _parse_core_base_closure(lock_path, root, env, canonicalize_name, Version, InvalidVersion,
+                                      root_extras=selected)
     if len(_CORE_LOCK_CLOSURE_CACHE) >= 32:
         _CORE_LOCK_CLOSURE_CACHE.clear()
     _CORE_LOCK_CLOSURE_CACHE[cache_key] = result
@@ -362,6 +366,8 @@ def _parse_core_base_closure(
     canonicalize_name,
     Version,
     InvalidVersion,
+    *,
+    root_extras: tuple[str, ...] = (),
 ) -> CoreBaseClosure | None:
     try:
         data = tomllib.loads(lock_path.read_text(encoding="utf-8-sig"))
@@ -388,6 +394,8 @@ def _parse_core_base_closure(
 
     queue: list[tuple[dict, tuple[str, ...]]] = []
     _enqueue_edges(root.get("dependencies", ()), queue, by_name, env, canonicalize_name)
+    if root_extras:
+        queue.append((root, root_extras))
 
     while queue:
         node, req_extras = queue.pop()
@@ -540,8 +548,83 @@ def _pyproject_uv_sources(pyproject: Path | None) -> frozenset[str] | None:
     return frozenset(canonicalize_name(str(name)) for name in sources)
 
 
-def _pyproject_install_triggers(pyproject: Path | None) -> tuple[str, ...]:
-    """Human-readable names of the ``pyproject.toml`` features that set ``pyproject_installs``."""
+def _core_declared_extras(project_root: Path | None = None) -> frozenset[str] | None:
+    """Normalized names of the extras Hermes core declares, or ``None`` when unreadable.
+
+    PM's ``uv sync`` names only core extras (``--extra``, or ``--all-extras`` over the root),
+    and a generation keeps only the member extras that sync selects, so these names bound
+    which plugin extras can ever install.
+    """
+    root = _canonical_core_root(project_root)
+    if root is None:
+        return None
+    try:
+        document = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8-sig"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    optional = document.get("project", {}).get("optional-dependencies")
+    if optional is None:
+        return frozenset()
+    if not isinstance(optional, Mapping):
+        return None
+    return frozenset(_normalize_extra(str(name)) for name in optional)
+
+
+def _optional_dependencies_install(document: dict, *, project_root: Path | None,
+                                   target_env: Mapping[str, str] | None,
+                                   allow_marker_skip: bool) -> bool:
+    """Whether a ``[project.optional-dependencies]`` extra can add packages to a PM sync.
+
+    A generation keeps only the member extras its sync selects (``--extra`` names core
+    extras, applied to every member declaring one) plus those its own ``name[extra]``
+    references reach (``pm.workspace._selected_member_extras``); uv never sees the rest. A
+    selected extra named like a core extra installs only alongside that core extra, so it adds
+    nothing when core's lock closure for base plus that extra already guarantees its specs.
+    Anything unknown or unreadable counts as installing.
+    """
+    from packaging.markers import default_environment
+
+    metadata = document.get("project", {})
+    optional = metadata.get("optional-dependencies", {}) if isinstance(metadata, Mapping) else {}
+    if not isinstance(optional, Mapping) or not any(optional.values()):
+        return False
+    core_extras = _core_declared_extras(project_root)
+    root = _canonical_core_root(project_root)
+    if core_extras is None or root is None:
+        return True
+    from pm.workspace import _selected_member_extras
+
+    env = {key: str(value) for key, value in (default_environment() if target_env is None else target_env).items()}
+    try:
+        # With no known target interpreter every self-reference counts as installing.
+        selected, _named = _selected_member_extras(document, core_extras, env if allow_marker_skip else None)
+    except (AttributeError, TypeError, ValueError):
+        return True
+    uv_sources = document.get("tool", {}).get("uv", {}).get("sources")
+    has_uv_sources = uv_sources is not None and (not isinstance(uv_sources, Mapping) or bool(uv_sources))
+    for key, specs in optional.items():
+        extra = _normalize_extra(str(key))
+        if extra not in selected or not specs:
+            continue
+        if extra not in core_extras or not isinstance(specs, list):
+            return True
+        closure = read_core_base_closure(root, target_env=env, root_extras=(extra,))
+        if _unsatisfied_specs([str(spec) for spec in specs], closure, has_uv_sources=has_uv_sources,
+                              env=env, allow_marker_skip=allow_marker_skip):
+            return True
+    return False
+
+
+def _pyproject_install_triggers(pyproject: Path | None, *, project_root: Path | None = None,
+                                target_env: Mapping[str, str] | None = None,
+                                allow_marker_skip: bool = True,
+                                filter_extras: bool = False) -> tuple[str, ...]:
+    """Human-readable names of the ``pyproject.toml`` features that set ``pyproject_installs``.
+
+    With *filter_extras*, ``[project.optional-dependencies]`` counts only when an extra can add
+    packages (``_optional_dependencies_install``): an extra no Hermes sync selects, or one whose
+    specs core's same-named extra already pins, installs nothing new.
+    """
     if pyproject is None:
         return ()
     try:
@@ -555,7 +638,10 @@ def _pyproject_install_triggers(pyproject: Path | None) -> tuple[str, ...]:
         triggers.append("[build-system]")
     if uv.get("package") is True:
         triggers.append("tool.uv.package = true")
-    if isinstance(metadata, Mapping) and any(metadata.get("optional-dependencies", {}).values()):
+    if isinstance(metadata, Mapping) and any(metadata.get("optional-dependencies", {}).values()) and (
+            not filter_extras
+            or _optional_dependencies_install(document, project_root=project_root, target_env=target_env,
+                                              allow_marker_skip=allow_marker_skip)):
         triggers.append("[project.optional-dependencies]")
     if any(document.get("dependency-groups", {}).values()):
         triggers.append("[dependency-groups]")
@@ -586,10 +672,7 @@ def unsatisfied_requirements(
     if not raw_specs:
         return ()
 
-    from packaging.markers import UndefinedComparison, UndefinedEnvironmentName, default_environment
-    from packaging.requirements import InvalidRequirement, Requirement
-    from packaging.utils import canonicalize_name
-    from packaging.version import Version
+    from packaging.markers import default_environment
 
     env = dict(default_environment()) if target_env is None else dict(target_env)
     closure = _resolve_base_closure(
@@ -599,6 +682,23 @@ def unsatisfied_requirements(
     )
     uv_sources = _pyproject_uv_sources(declaration.pyproject)
     has_uv_sources = uv_sources is None or bool(uv_sources)
+    return _unsatisfied_specs(raw_specs, closure, has_uv_sources=has_uv_sources, env=env,
+                              allow_marker_skip=allow_marker_skip)
+
+
+def _unsatisfied_specs(
+    raw_specs: Iterable[str],
+    closure: CoreBaseClosure | None,
+    *,
+    has_uv_sources: bool,
+    env: Mapping[str, str],
+    allow_marker_skip: bool,
+) -> tuple[str, ...]:
+    """The *raw_specs* that *closure* does not guarantee (see ``unsatisfied_requirements``)."""
+    from packaging.markers import UndefinedComparison, UndefinedEnvironmentName
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+    from packaging.version import Version
 
     unsatisfied: list[str] = []
     for spec in raw_specs:
@@ -719,9 +819,17 @@ def assess_workspace_membership(
     env = dict(default_environment()) if target_env is None else dict(target_env)
     reasons: list[str] = []
 
-    if declaration.pyproject_installs:
-        triggers = ", ".join(_pyproject_install_triggers(declaration.pyproject)) or "pyproject.toml"
-        reasons.append(f"pyproject.toml triggers package installation ({triggers})")
+    pyproject_installs = declaration.pyproject_installs
+    if pyproject_installs:
+        triggers = _pyproject_install_triggers(declaration.pyproject, project_root=project_root,
+                                               target_env=env, allow_marker_skip=allow_marker_skip,
+                                               filter_extras=True)
+        # Only inert extras set the flag: that pyproject installs nothing through PM.
+        if not triggers and not _pyproject_install_triggers(declaration.pyproject):
+            triggers = ("pyproject.toml",)
+        pyproject_installs = bool(triggers)
+        if pyproject_installs:
+            reasons.append(f"pyproject.toml triggers package installation ({', '.join(triggers)})")
 
     uv_sources = _pyproject_uv_sources(declaration.pyproject)
     if uv_sources is None:
@@ -756,7 +864,7 @@ def assess_workspace_membership(
         needs_member=bool(reasons),
         reasons=tuple(reasons),
         unsatisfied_requirements=unsatisfied,
-        pyproject_installs=declaration.pyproject_installs,
+        pyproject_installs=pyproject_installs,
         python_error=python_error,
     )
 

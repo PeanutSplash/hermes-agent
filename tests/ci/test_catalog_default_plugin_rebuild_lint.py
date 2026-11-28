@@ -99,6 +99,38 @@ def test_pyproject_installs_triggers_rebuild_diagnostic(tmp_path, extra_toml, ex
     assert "[build-system]" in result.guidance
 
 
+@pytest.mark.parametrize("pyproject", [
+    # weixin 2.0.0 and qqbot 2.0.0, as pinned by plugin-catalog/{weixin,qqbot}.yaml.
+    'dependencies = ["aiohttp>=3.9,<4", "cryptography>=44,<51"]\n',
+    'dependencies = ["aiohttp>=3.14.5,<4", "httpx>=0.28.1,<1", "qrcode>=7.4.2,<8"]\n'
+    '[project.optional-dependencies]\nsilk = ["pilk>=0.2.4,<0.3"]\n',
+], ids=["weixin", "qqbot"])
+def test_default_messaging_plugins_need_no_rebuild_on_any_platform(tmp_path, pyproject):
+    """aiohttp and qrcode are core base dependencies; qqbot's ``silk`` extra installs only with
+    core's own ``silk`` extra, whose pilk pin it accepts."""
+    plugin = _write_plugin(
+        tmp_path / "messaging-default",
+        pyproject='[project]\nname = "messaging-default"\nversion = "2.0.0"\nrequires-python = ">=3.11"\n' + pyproject,
+    )
+    result = check_default_plugin_venv_rebuild(plugin, project_root=ROOT)
+    assert (result.triggers_rebuild, result.reason, result.pyproject_installs) == (False, "", False)
+
+
+def test_optional_extra_core_does_not_provide_triggers_rebuild_diagnostic(tmp_path):
+    plugin = _write_plugin(
+        tmp_path / "extra-default",
+        pyproject=(
+            '[project]\nname = "extra-default"\nversion = "1.0.0"\nrequires-python = ">=3.11"\n'
+            'dependencies = ["cryptography>=50,<51"]\n'
+            '[project.optional-dependencies]\ntelegram = ["langfuse==4.15.2"]\n'
+        ),
+    )
+    result = check_default_plugin_venv_rebuild(plugin, project_root=ROOT)
+    assert result.triggers_rebuild is True
+    assert result.pyproject_installs is True
+    assert "[project.optional-dependencies]" in result.reason
+
+
 def test_windows_only_unsatisfied_dep_is_caught_on_linux_ci(tmp_path):
     plugin = _write_plugin(
         tmp_path / "win-only",
