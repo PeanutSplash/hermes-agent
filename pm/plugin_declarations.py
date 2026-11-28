@@ -609,8 +609,9 @@ def _optional_dependencies_install(document: dict, *, project_root: Path | None,
         if extra not in core_extras or not isinstance(specs, list):
             return True
         closure = read_core_base_closure(root, target_env=env, root_extras=(extra,))
+        # uv evaluates an extra's specs with ``extra`` bound to that extra's name.
         if _unsatisfied_specs([str(spec) for spec in specs], closure, has_uv_sources=has_uv_sources,
-                              env=env, allow_marker_skip=allow_marker_skip):
+                              env={**env, "extra": str(key)}, allow_marker_skip=allow_marker_skip):
             return True
     return False
 
@@ -719,6 +720,10 @@ def _unsatisfied_specs(
             continue
         name = canonicalize_name(req.name)
         if name == "hermes-agent":
+            # ``hermes-agent[x]`` activates core extra ``x`` through the workspace root, which
+            # only a member's sync installs.
+            if req.extras:
+                unsatisfied.append(spec)
             continue
         if closure is None or has_uv_sources:
             unsatisfied.append(spec)

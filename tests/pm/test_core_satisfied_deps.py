@@ -1101,7 +1101,12 @@ _QQBOT_SHAPE = (
     '[project.optional-dependencies]\nplugin-only = ["langfuse==4.15.2"]\n',
     # Core's own `silk` extra pins pilk==0.2.4, so selecting it installs nothing new.
     '[project.optional-dependencies]\nsilk = ["pilk>=0.2.4,<0.3"]\n',
-], ids=["extra-no-hermes-sync-selects", "extra-core-same-extra-pins"])
+    # uv binds `extra` to `silk` while reading that extra, and core's `silk` still pins pilk.
+    '[project.optional-dependencies]\nsilk = ["pilk>=0.2.4,<0.3; extra == \'silk\'"]\n',
+    # A marker naming another extra never applies under `silk`.
+    '[project.optional-dependencies]\nsilk = ["langfuse==4.15.2; extra == \'other\'"]\n',
+], ids=["extra-no-hermes-sync-selects", "extra-core-same-extra-pins", "extra-marker-core-same-extra-pins",
+        "extra-marker-names-another-extra"])
 def test_inert_optional_extra_with_core_satisfied_deps_skips_workspace_membership(tmp_path, extras_toml):
     decl = read_python_declaration(_write_plugin(tmp_path / "inert-extra", pyproject=_QQBOT_SHAPE + extras_toml))
     assert decl.pyproject_installs is True  # dependency consent and stamps still see the extra
@@ -1115,13 +1120,23 @@ def test_inert_optional_extra_with_core_satisfied_deps_skips_workspace_membershi
     # Named like a core extra, so `--extra telegram` selects it, and core does not provide it.
     ('[project.optional-dependencies]\ntelegram = ["langfuse==4.15.2"]\n', "[project.optional-dependencies]"),
     ('[project.optional-dependencies]\nsilk = ["pilk>=0.3"]\n', "[project.optional-dependencies]"),
+    # `extra` is bound to the extra being read, in PEP 508's normalized form.
+    ('[project.optional-dependencies]\nsilk = ["langfuse==4.15.2; extra == \'silk\'"]\n',
+     "[project.optional-dependencies]"),
+    ('[project.optional-dependencies]\nTTS_Premium = ["langfuse==4.15.2; extra == \'tts-premium\'"]\n',
+     "[project.optional-dependencies]"),
+    # `hermes-agent[x]` turns on core extra `x`, which only a member's sync installs.
+    ('[project.optional-dependencies]\nsilk = ["hermes-agent[kittentts]"]\n', "[project.optional-dependencies]"),
+    ('[project.optional-dependencies]\nsilk = ["hermes-agent[messaging]"]\n', "[project.optional-dependencies]"),
     # A base self-reference installs a plugin-only extra on every sync.
     ('[project.optional-dependencies]\nplugin-only = ["langfuse==4.15.2"]\n', "[project.optional-dependencies]"),
     ('[dependency-groups]\ndev = ["pytest"]\n', "[dependency-groups]"),
     ('[tool.uv]\ndev-dependencies = ["pytest"]\n', "tool.uv.dev-dependencies"),
     ('[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n', "[build-system]"),
     ('[tool.uv]\npackage = true\n', "tool.uv.package = true"),
-], ids=["hermes-extra-new-package", "hermes-extra-outside-core-pin", "self-referenced-extra",
+], ids=["hermes-extra-new-package", "hermes-extra-outside-core-pin", "extra-marker-new-package",
+        "extra-marker-normalized-name", "core-extra-via-hermes-agent-kittentts",
+        "core-extra-via-hermes-agent-messaging", "self-referenced-extra",
         "dependency-groups", "dev-dependencies", "build-system", "uv-package"])
 def test_installing_pyproject_features_still_require_workspace_member(tmp_path, extra_toml, token):
     pyproject = _QQBOT_SHAPE + extra_toml
@@ -1130,10 +1145,20 @@ def test_installing_pyproject_features_still_require_workspace_member(tmp_path, 
     decl = read_python_declaration(_write_plugin(tmp_path / "installs", pyproject=pyproject))
     assessment = assess_workspace_membership(decl, project_root=REPO_ROOT)
     assert assessment.needs_member is True
-    if "plugin-only" not in extra_toml:
-        assert assessment.pyproject_installs is True
-        assert any(token in reason for reason in assessment.reasons), assessment.reasons
+    assert assessment.pyproject_installs is True
+    assert any(token in reason for reason in assessment.reasons), assessment.reasons
     assert needs_workspace_member(decl, project_root=REPO_ROOT) is True
+
+
+@pytest.mark.parametrize("dep, unsatisfied", [
+    ("hermes-agent[messaging]", ("hermes-agent[messaging]",)),
+    ("hermes-agent", ()),
+], ids=["core-extra", "bare-core"])
+def test_base_dependency_on_core_extra_requires_workspace_member(tmp_path, dep, unsatisfied):
+    pyproject = _QQBOT_SHAPE.replace('"qrcode>=7.4.2,<8"]', f'"qrcode>=7.4.2,<8", "{dep}"]')
+    decl = read_python_declaration(_write_plugin(tmp_path / "core-ref", pyproject=pyproject))
+    assert unsatisfied_requirements(decl, project_root=REPO_ROOT) == unsatisfied
+    assert needs_workspace_member(decl, project_root=REPO_ROOT) is bool(unsatisfied)
 
 
 def test_unreadable_core_extras_keep_optional_dependencies_conservative(tmp_path):
