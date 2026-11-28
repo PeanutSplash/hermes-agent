@@ -20,7 +20,14 @@ if TYPE_CHECKING:
 from pm import paths
 from pm.filesystem import long_root
 from pm.package import InstallError
-from pm.plugin_declarations import manifest_version_error, needs_workspace_member, read_python_declaration
+from pm.plugin_declarations import (
+    manifest_version_error,
+    needs_workspace_member,
+    read_python_declaration,
+    reference_active,
+    selected_member_extras,
+    self_references,
+)
 
 _MEMBER_EXCLUDE = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"})
 
@@ -454,76 +461,6 @@ def _member_key(identity: Path) -> str:
     return f"{name}-{digest}"
 
 
-def _selected_member_extras(document: dict, extras: Iterable[str],
-                            target: Mapping[str, str] | None = None) -> tuple[set[str], set[str]]:
-    """The member's extras this generation installs, and those it only names.
-
-    Installed: those ``uv sync --extra`` names (it applies a name to every member declaring
-    it), closed over the member's own ``name[extra]`` references, which install whatever
-    references them. A reference is evaluated on *target* (the installing interpreter's
-    marker environment) under every extra this sync installs, so a base dependency
-    ``plugin[feature]; extra == 'runtime'`` installs ``feature`` once ``runtime`` is in, and
-    ``plugin[windows]; sys_platform == 'win32'`` installs no ``windows`` on Linux; that extra
-    is returned as named, because the build backend still validates the reference against
-    the extras table. With no *target*, or a marker it cannot evaluate, the reference installs.
-    """
-    from packaging.utils import canonicalize_name
-
-    from pm.install import _extra_key
-
-    project = document.get("project", {})
-    declared = {_extra_key(key): specs for key, specs in project.get("optional-dependencies", {}).items()}
-    own = canonicalize_name(str(project.get("name", "")))
-    selected = {_extra_key(extra) for extra in extras} & declared.keys()
-    references = {"": _self_references(project.get("dependencies", []), own)}
-    while True:
-        for key in selected - references.keys():
-            references[key] = _self_references(declared[key], own)
-        contexts = ("", *sorted(selected))
-        reached = {key for requirements in references.values() for requirement in requirements
-                   if _reference_active(requirement, contexts, target)
-                   for key in {_extra_key(name) for name in requirement.extras} & declared.keys()}
-        if reached <= selected:
-            break
-        selected |= reached
-    named = {key for requirements in references.values() for requirement in requirements
-             for key in {_extra_key(name) for name in requirement.extras} & declared.keys()}
-    return selected, named - selected
-
-
-def _self_references(specs: Iterable[str], own: str) -> list:
-    """The requirements among *specs* that name the project *own* itself."""
-    from packaging.requirements import InvalidRequirement, Requirement
-    from packaging.utils import canonicalize_name
-
-    references = []
-    for spec in specs:
-        try:
-            requirement = Requirement(spec)
-        except InvalidRequirement:
-            continue  # uv reports it; this pass only decides what to keep.
-        if canonicalize_name(requirement.name) == own:
-            references.append(requirement)
-    return references
-
-
-def _reference_active(requirement, contexts: Iterable[str], target: Mapping[str, str] | None) -> bool:
-    """Whether *requirement* applies on *target* under any of the installed extra *contexts*.
-
-    uv lowers an extra's requirements to ``marker and extra == '<that extra>'``, and that extra
-    is among *contexts* once it is reached, so one evaluation per installed extra covers base
-    and extra requirements alike; a conjunction over two extras is kept, never dropped.
-    """
-    from packaging.markers import UndefinedComparison, UndefinedEnvironmentName
-
-    if requirement.marker is None or target is None:
-        return True
-    try:
-        return any(requirement.marker.evaluate({**target, "extra": extra}) for extra in contexts)
-    except (UndefinedComparison, UndefinedEnvironmentName):
-        return True
-
-
 def _prune_member_sources(settings: dict, installed: set[str]) -> bool:
     """Drop ``tool.uv.sources`` alternatives for an extra or group this generation removed.
 
@@ -618,7 +555,7 @@ def _runtime_member_metadata(document: dict, extras: Iterable[str],
     optional = project.get("optional-dependencies")
     keep: set[str] = set()
     if optional:
-        keep, named = _selected_member_extras(document, extras, target)
+        keep, named = selected_member_extras(document, extras, target)
         # A named-only extra stays declared but empty: its pins cannot reach the lock.
         kept = {key: specs if _extra_key(key) in keep else [] for key, specs in optional.items()
                 if _extra_key(key) in keep | named}
@@ -686,11 +623,11 @@ def core_requirement_error(declaration, extras: Iterable[str] | None = None,
     specs, installed = list(declaration.requirements), set()
     if declaration.pyproject is not None:
         document = tomllib.loads(declaration.pyproject.read_text(encoding="utf-8-sig"))
-        installed = _selected_member_extras(document, _recorded_extras() if extras is None else extras, environment)[0]
+        installed = selected_member_extras(document, _recorded_extras() if extras is None else extras, environment)[0]
         specs += [spec for name, values in document["project"].get("optional-dependencies", {}).items()
                   if _extra_key(name) in installed for spec in values]
-    pins = [requirement for requirement in _self_references(specs, "hermes-agent")
-            if requirement.specifier and _reference_active(requirement, ("", *sorted(installed)), environment)]
+    pins = [requirement for requirement in self_references(specs, "hermes-agent")
+            if requirement.specifier and reference_active(requirement, ("", *sorted(installed)), environment)]
     if not pins:
         return None
     current = running_hermes_version()

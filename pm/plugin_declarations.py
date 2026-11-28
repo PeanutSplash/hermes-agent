@@ -570,6 +570,74 @@ def _core_declared_extras(project_root: Path | None = None) -> frozenset[str] | 
     return frozenset(_normalize_extra(str(name)) for name in optional)
 
 
+def self_references(specs: Iterable[str], own: str) -> list:
+    """The requirements among *specs* that name the project *own* itself."""
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+
+    references = []
+    for spec in specs:
+        try:
+            requirement = Requirement(spec)
+        except InvalidRequirement:
+            continue  # uv reports it; this pass only decides what to keep.
+        if canonicalize_name(requirement.name) == own:
+            references.append(requirement)
+    return references
+
+
+def reference_active(requirement, contexts: Iterable[str], target: Mapping[str, str] | None) -> bool:
+    """Whether *requirement* applies on *target* under any of the installed extra *contexts*.
+
+    uv lowers an extra's requirements to ``marker and extra == '<that extra>'``, and that extra
+    is among *contexts* once it is reached, so one evaluation per installed extra covers base
+    and extra requirements alike; a conjunction over two extras is kept, never dropped.
+    """
+    from packaging.markers import UndefinedComparison, UndefinedEnvironmentName
+
+    if requirement.marker is None or target is None:
+        return True
+    try:
+        return any(requirement.marker.evaluate({**target, "extra": extra}) for extra in contexts)
+    except (UndefinedComparison, UndefinedEnvironmentName):
+        return True
+
+
+def selected_member_extras(document: dict, extras: Iterable[str],
+                           target: Mapping[str, str] | None = None) -> tuple[set[str], set[str]]:
+    """The member's extras this generation installs, and those it only names.
+
+    Installed: those ``uv sync --extra`` names (it applies a name to every member declaring
+    it), closed over the member's own ``name[extra]`` references, which install whatever
+    references them. A reference is evaluated on *target* (the installing interpreter's
+    marker environment) under every extra this sync installs, so a base dependency
+    ``plugin[feature]; extra == 'runtime'`` installs ``feature`` once ``runtime`` is in, and
+    ``plugin[windows]; sys_platform == 'win32'`` installs no ``windows`` on Linux; that extra
+    is returned as named, because the build backend still validates the reference against
+    the extras table. With no *target*, or a marker it cannot evaluate, the reference installs.
+    """
+    from packaging.utils import canonicalize_name
+
+    project = document.get("project", {})
+    declared = {_normalize_extra(key): specs for key, specs in project.get("optional-dependencies", {}).items()}
+    own = canonicalize_name(str(project.get("name", "")))
+    selected = {_normalize_extra(extra) for extra in extras} & declared.keys()
+    references = {"": self_references(project.get("dependencies", []), own)}
+    while True:
+        for key in selected - references.keys():
+            references[key] = self_references(declared[key], own)
+        contexts = ("", *sorted(selected))
+        reached = {key for requirements in references.values() for requirement in requirements
+                   if reference_active(requirement, contexts, target)
+                   for key in {_normalize_extra(name) for name in requirement.extras} & declared.keys()}
+        if reached <= selected:
+            break
+        selected |= reached
+    named = {key for requirements in references.values() for requirement in requirements
+             for key in {_normalize_extra(name) for name in requirement.extras} & declared.keys()}
+    return selected, named - selected
+
+
 def _optional_dependencies_install(document: dict, *, project_root: Path | None,
                                    target_env: Mapping[str, str] | None,
                                    allow_marker_skip: bool) -> bool:
@@ -577,7 +645,7 @@ def _optional_dependencies_install(document: dict, *, project_root: Path | None,
 
     A generation keeps only the member extras its sync selects (``--extra`` names core
     extras, applied to every member declaring one) plus those its own ``name[extra]``
-    references reach (``pm.workspace._selected_member_extras``); uv never sees the rest. A
+    references reach (``selected_member_extras``); uv never sees the rest. A
     selected extra named like a core extra installs only alongside that core extra, so it adds
     nothing when core's lock closure for base plus that extra already guarantees its specs.
     Anything unknown or unreadable counts as installing.
@@ -592,12 +660,11 @@ def _optional_dependencies_install(document: dict, *, project_root: Path | None,
     root = _canonical_core_root(project_root)
     if core_extras is None or root is None:
         return True
-    from pm.workspace import _selected_member_extras
 
     env = {key: str(value) for key, value in (default_environment() if target_env is None else target_env).items()}
     try:
         # With no known target interpreter every self-reference counts as installing.
-        selected, _named = _selected_member_extras(document, core_extras, env if allow_marker_skip else None)
+        selected, _named = selected_member_extras(document, core_extras, env if allow_marker_skip else None)
     except (AttributeError, TypeError, ValueError):
         return True
     uv_sources = document.get("tool", {}).get("uv", {}).get("sources")
@@ -609,9 +676,12 @@ def _optional_dependencies_install(document: dict, *, project_root: Path | None,
         if extra not in core_extras or not isinstance(specs, list):
             return True
         closure = read_core_base_closure(root, target_env=env, root_extras=(extra,))
-        # uv evaluates an extra's specs with ``extra`` bound to that extra's name.
+        # uv evaluates an extra's specs with ``extra`` bound to that extra's name, and unlike
+        # base dependencies (stripped by ``applicable_requirements``) optional-dependencies keep
+        # ``hermes-agent[x]`` intact for ``uv sync --all-packages --extra <name>``.
         if _unsatisfied_specs([str(spec) for spec in specs], closure, has_uv_sources=has_uv_sources,
-                              env={**env, "extra": str(key)}, allow_marker_skip=allow_marker_skip):
+                              env={**env, "extra": str(key)}, allow_marker_skip=allow_marker_skip,
+                              include_core_extras=True):
             return True
     return False
 
@@ -694,6 +764,7 @@ def _unsatisfied_specs(
     has_uv_sources: bool,
     env: Mapping[str, str],
     allow_marker_skip: bool,
+    include_core_extras: bool = False,
 ) -> tuple[str, ...]:
     """The *raw_specs* that *closure* does not guarantee (see ``unsatisfied_requirements``)."""
     from packaging.markers import UndefinedComparison, UndefinedEnvironmentName
@@ -720,9 +791,11 @@ def _unsatisfied_specs(
             continue
         name = canonicalize_name(req.name)
         if name == "hermes-agent":
-            # ``hermes-agent[x]`` activates core extra ``x`` through the workspace root, which
-            # only a member's sync installs.
-            if req.extras:
+            # In optional-dependencies (``include_core_extras=True``), ``hermes-agent[x]``
+            # survives into the generated member and activates core extra ``x`` through the
+            # workspace root. In base dependencies, ``applicable_requirements`` strips every
+            # ``hermes-agent`` requirement so it is inert.
+            if include_core_extras and req.extras:
                 unsatisfied.append(spec)
             continue
         if closure is None or has_uv_sources:

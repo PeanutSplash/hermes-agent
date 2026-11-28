@@ -1150,15 +1150,35 @@ def test_installing_pyproject_features_still_require_workspace_member(tmp_path, 
     assert needs_workspace_member(decl, project_root=REPO_ROOT) is True
 
 
-@pytest.mark.parametrize("dep, unsatisfied", [
-    ("hermes-agent[messaging]", ("hermes-agent[messaging]",)),
-    ("hermes-agent", ()),
+@pytest.mark.parametrize("dep", [
+    "hermes-agent[messaging]",
+    "hermes-agent",
 ], ids=["core-extra", "bare-core"])
-def test_base_dependency_on_core_extra_requires_workspace_member(tmp_path, dep, unsatisfied):
+def test_base_dependency_on_hermes_agent_is_stripped_and_inert(tmp_path, dep):
+    """Base ``hermes-agent`` requirements (even with extras) are stripped by
+    ``applicable_requirements`` before ``_workspace_member`` writes the member, so
+    they must not trigger a wasted rebuild. (By contrast, ``optional-dependencies``
+    keeps ``hermes-agent[x]`` intact — covered in
+    ``test_installing_pyproject_features_still_require_workspace_member``.)"""
     pyproject = _QQBOT_SHAPE.replace('"qrcode>=7.4.2,<8"]', f'"qrcode>=7.4.2,<8", "{dep}"]')
     decl = read_python_declaration(_write_plugin(tmp_path / "core-ref", pyproject=pyproject))
-    assert unsatisfied_requirements(decl, project_root=REPO_ROOT) == unsatisfied
-    assert needs_workspace_member(decl, project_root=REPO_ROOT) is bool(unsatisfied)
+    assert all("hermes-agent" not in req for req in decl.install_requirements)
+    assert unsatisfied_requirements(decl, project_root=REPO_ROOT) == ()
+    assert needs_workspace_member(decl, project_root=REPO_ROOT) is False
+
+
+def test_plugin_declarations_does_not_import_pm_workspace():
+    """Guard against circular imports between pm.plugin_declarations and pm.workspace."""
+    import ast
+
+    tree = ast.parse((REPO_ROOT / "pm" / "plugin_declarations.py").read_text(encoding="utf-8"))
+    imported_workspace = [
+        node.lineno
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("pm.workspace"))
+        or (isinstance(node, ast.Import) and any(alias.name.startswith("pm.workspace") for alias in node.names))
+    ]
+    assert imported_workspace == []
 
 
 def test_unreadable_core_extras_keep_optional_dependencies_conservative(tmp_path):
